@@ -36,22 +36,26 @@ reorder the Scraper's Phase 2 work toward correctness before observability.
   repos directly, plus the slug-derivation finding that adds a reconcile stage
 - **`docs/analysis/resolved-questions.md`** — the two gating questions answered empirically
   (both clear), and the retry trap and fail-silent tag path that answering them exposed
+- **`docs/analysis/electicode-fields.md`** — the admin edit modal read from a live DOM capture:
+  difficulty closed and verified, categories unconstrained and carrying two taxonomies, and the
+  tag-overwrite risk that reset-vs-add resolves
+- **`docs/analysis/characteristics-diff.md`** — the author's spec against the real parser. They
+  are compatible; the six silent-failure edges are what Maestro has to check itself
 - **`docs/contracts/`** — the problem-developer's authoring contract (output contract,
   characteristics spec, manifest spec, preflight checklist, system prompt, tool spec)
 - **`docs/prompts/`** — the briefs originally sent to each actor
 
 ## Next steps
 
-1. Answer the two empirical questions that gate everything: does a package with one solution
-   and no validator pass Polygon's `buildPackage(verify=true)`, and does the import pipeline
-   mark `s0` tests as samples.
-2. Collect the outstanding Scraper and Middleman documents (`docs/analysis/phase1-findings.md`
-   §7) and run the seam diff and the `characteristics.md` format diff.
-3. Reconcile the two independent `characteristics.md` specs — consumer wins on layout,
-   author wins on semantics.
-4. Phase 2 in both apps, correctness items first.
-5. Build the job store and the Polygon lane, then the shaping stage, then the ElectiCode
-   lane, then the dashboard.
+Design questions are settled. Everything below is build work.
+
+1. One preview-mode test upload of a hand-shaped folder, to close the three server-side
+   unknowns in `seam-verdict.md` §4 (statement images, `solutions/main.cpp` naming, whether the
+   extra `statements/` subdirectories are tolerated).
+2. Phase 2 in both apps, correctness items first — exact-match slug resolution and the
+   `--char` audit ahead of `--json`; async job model and per-error codes on the Middleman.
+3. Build order: job store → Polygon lane → shaping stage → upload → **stage 6.5 reconcile** →
+   post-upload chores → audit gate → dashboard.
 
 Secrets (Polygon key/secret, ElectiCode session cookies, Anthropic API key) stay local and
 gitignored. Nothing here is exposed publicly — remote access is over a mesh VPN.
