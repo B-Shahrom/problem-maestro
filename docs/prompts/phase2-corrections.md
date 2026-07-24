@@ -192,9 +192,26 @@ Consequences for Maestro, not for either toolkit:
   parent containing *only* the problems that still need uploading — driven by the per-problem
   `exists` from Addendum 1A plus its own job state. Re-pointing at the original parent is wrong.
 
-### The open question this creates — highest priority for the operator
+### RESOLVED — the overwrite is non-destructive
 
-**Does the overwrite wipe the ElectiCode-side edit-modal fields?**
+**Operator-tested: everything survives.** Difficulty, categories, division access — and
+**existing submissions**. That last one is the strongest signal: the DB row keeps its identity
+and its relations, so an overwrite updates the S3/package payload rather than deleting and
+recreating the problem.
+
+**This reverses the consequence above.** Stage 6 *is* safely re-runnable. Maestro needs no
+"never re-upload past stage 7" invariant, and rebuilding the parent folder from per-problem
+`exists` is an **optimisation** (avoid uploading what doesn't need it) rather than a correctness
+requirement. Retry and resume are cheap.
+
+Also an operational safety property worth recording: re-uploading a problem mid-course does not
+destroy student submissions.
+
+**Unchanged by this:** the reset-vs-add tag decision. That hazard is in
+`problem_editor assign --category`, which uses `fill()` to replace the field — a different
+mechanism from upload. Correction 1 stands in full; per-problem `exists` is still required.
+
+*Original framing of the question, retained for the record:*
 
 The upload carries the S3/package payload (statement, tests, solution, checker). The edit modal's
 `displayName`, `displayDescription`, `editorial`, `difficulty`, `category`, `olympiad*` and sample
