@@ -17,12 +17,12 @@ and exposes one dashboard.
 Design phase. All three actors have returned their Phase 1 integration manuals; the
 cross-actor analysis is in `docs/analysis/phase1-findings.md`.
 
-Headline: **the filesystem hand-off does not match.** Polygon emits a flat, slug-less
-package (one problem per zip, identified only by numeric id); the ElectiCode uploader wants
-a parent directory of slug-named problem folders. A shaping stage between stages 5 and 6 is
-mandatory, not optional. Two further findings — a slug-addressing hole that lets metadata
-land on the wrong problem undetected, and three CLI tools that cannot express failure —
-reorder the Scraper's Phase 2 work toward correctness before observability.
+Headline: **the hand-off works unshaped.** A preview upload confirmed ElectiCode accepts
+Polygon's raw extracted package with the folder named for the slug — no file moves, no
+renaming, no pruning beyond Windows binaries. The shaping stage that looked like a subsystem
+is three lines. What remains is real: a slug-addressing hole that lets metadata land on the
+wrong problem undetected, three CLI tools that cannot express failure, and a tag field that
+overwrites rather than appends. Those reorder Phase 2 toward correctness before observability.
 
 ## Contents
 
@@ -50,13 +50,12 @@ reorder the Scraper's Phase 2 work toward correctness before observability.
 
 Design questions are settled. Everything below is build work.
 
-1. **Run 0 of `docs/procedures/shaping-test-upload.md`** — one non-mutating preview upload of
-   the raw Polygon package. If ElectiCode accepts it as-is, the shaping stage collapses to
-   extract + rename + prune and most of `seam-verdict.md` §4 disappears.
-2. Phase 2 in both apps, correctness items first, with the corrections in
-   `docs/prompts/phase2-corrections.md` sent alongside the go-ahead.
-3. Build order: job store → Polygon lane → shaping stage → upload → **stage 6.5 reconcile** →
-   post-upload chores → audit gate → dashboard.
+1. ~~Run 0~~ — **done, passed.** ElectiCode accepts Polygon's raw package; the shaping stage
+   collapses to extract + rename folder to slug + delete `*.exe`. See the banner at the top of
+   `docs/analysis/seam-verdict.md`.
+2. Phase 2 in both apps — **in progress**, corrections sent.
+3. Build order: job store → Polygon lane → *(shaping: three lines, no longer a stage)* → upload
+   → **stage 6.5 reconcile** → post-upload chores → audit gate → dashboard.
 
 Secrets (Polygon key/secret, ElectiCode session cookies, Anthropic API key) stay local and
 gitignored. Nothing here is exposed publicly — remote access is over a mesh VPN.

@@ -125,3 +125,33 @@ transform it, so whatever the test reveals changes Maestro's shaping stage, not 
 The one way it could reach back into the Scraper's scope is if ElectiCode turns out to reject the
 shaped folder outright and the fix belongs in `problem_uploader`. That would be **additive** to
 Phase 2, not a revision of it. Not a reason to hold.
+
+
+---
+
+## Addendum — two findings from the Run 0 preview (send to the Scraper)
+
+*The baseline shaping test produced live confirmation of one correction above and one new gap.*
+
+Preview run, two problem folders in the parent, one of them already on ElectiCode:
+
+```
+Contains 2 problem folder(s): edu-testing-best-stretch, edu-tree-applications-equal-population-regions
+Detected 2 problem(s) (1 already exist):
+    edu-tree-applications-equal-population-regions
+    edu-testing-best-stretch
+```
+
+**A. `EXISTS` being aggregate is now demonstrated, not theorised.** The output lists both slugs
+*and* says "1 already exist" — but never says **which one**. That is exactly the gap in
+correction 1. Maestro cannot make the per-problem reset-vs-add tag decision from this. The modal
+clearly knows (it flagged one), so associating the flag with its row should be a parsing change.
+
+**B. `--output run0.json` was not written in preview mode.** The run was invoked with
+`--output run0.json` and no file appeared; the JSON appears to be written only on `--apply`.
+
+This defeats the point of a dry run. Preview is where an orchestrator decides whether to
+proceed, so it is the mode that most needs machine-readable output — and today it is the only
+mode without it. Please make `--output` write in preview too, containing at minimum
+`{folder, candidates, detected[], exists per detected}`. This belongs with correction 1 and
+before the `--json` schema is frozen.

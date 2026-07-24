@@ -1,5 +1,40 @@
 # Seam verdict — resolved
 
+> ## ⚠️ SUPERSEDED BY EMPIRICAL RESULT — read this box first
+>
+> **Run 0 passed. ElectiCode accepts Polygon's raw, unshaped package.** The conclusion below —
+> "a genuine transformation, not a rename" — is **wrong**, and §4's shaping recipe is unnecessary.
+>
+> Preview upload of two untouched extracted packages (`.exe` pruned only), each in a folder named
+> for its slug:
+>
+> ```
+> Contains 2 problem folder(s): edu-testing-best-stretch, edu-tree-applications-equal-population-regions
+> Detected 2 problem(s) (1 already exist):
+>     edu-tree-applications-equal-population-regions
+>     edu-testing-best-stretch
+> ```
+>
+> Both detected. **Both slugs exactly match their folder names.** No renaming, no file moves, no
+> pruning of `statements/`, no `solutions/main.cpp`.
+>
+> **The shaping stage collapses to: extract → name the folder `<slug>` → delete `*.exe`.** It is
+> no longer a component with its own state and failure modes; it is three lines in the Polygon
+> lane. The `statements/` name collision, the `main.cpp` question, and the statement-images
+> question are all moot — the importer was built for Polygon's native layout, which the admin
+> UI's "Upload Polygon Folder" button had hinted at.
+>
+> Runs 1–3 were not executed, per the procedure's own instruction to stop here.
+>
+> **Still open:** whether the slug comes from the folder name or from `problem.xml` (both carried
+> the same value, so this run cannot separate them). It matters only for whether pruning
+> `problem.xml` would be safe — and since nothing now needs pruning, it is academic. Stage 6.5's
+> reconcile stays as a cheap guard, not an expected-failure path.
+>
+> Everything below is retained as the record of what was believed before the test.
+
+---
+
 *Supersedes `phase1-findings.md` §1, which was written from chat summaries. This is read
 directly from both repos: `polygon-middleman@ec2d370` and `platform-scraper@b8ad778`.*
 
