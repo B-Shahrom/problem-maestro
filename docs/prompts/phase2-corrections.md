@@ -142,10 +142,27 @@ Detected 2 problem(s) (1 already exist):
     edu-testing-best-stretch
 ```
 
-**A. `EXISTS` being aggregate is now demonstrated, not theorised.** The output lists both slugs
-*and* says "1 already exist" — but never says **which one**. That is exactly the gap in
-correction 1. Maestro cannot make the per-problem reset-vs-add tag decision from this. The modal
-clearly knows (it flagged one), so associating the flag with its row should be a parsing change.
+**A. `EXISTS` being aggregate is now demonstrated, not theorised — and it *is* only a parsing
+change.** The output lists both slugs *and* says "1 already exist" — but never says **which
+one**. Reading `_read_detection` (`:137-153`) shows why: it extracts slugs from
+`root.querySelectorAll("input[type=text]")` and, separately, counts `\bEXISTS\b` across the
+flattened `root.innerText`. The per-row pairing is present in the DOM and discarded at
+extraction. Walking rows instead of the blob fixes it:
+
+```js
+const rows = Array.from(root.querySelectorAll("input[type=text]")).map(inp => {
+  let row = inp;
+  while (row.parentElement && row.parentElement !== root &&
+         row.parentElement.querySelectorAll("input[type=text]").length === 1) {
+    row = row.parentElement;   // largest ancestor still containing only this input
+  }
+  return { id: (inp.value||'').trim(), exists: /\bEXISTS\b/i.test(row.innerText||'') };
+});
+```
+
+Keep the existing counts, add `rows` alongside — nothing reading the current output breaks.
+`problem_uploader.py dump` captures the upload modal if you want to confirm the row structure
+first.
 
 **B. `--output run0.json` was not written in preview mode.** The run was invoked with
 `--output run0.json` and no file appeared; the JSON appears to be written only on `--apply`.
@@ -155,3 +172,44 @@ proceed, so it is the mode that most needs machine-readable output — and today
 mode without it. Please make `--output` write in preview too, containing at minimum
 `{folder, candidates, detected[], exists per detected}`. This belongs with correction 1 and
 before the `--json` schema is frozen.
+
+
+---
+
+## Addendum 2 — the platform overwrites on re-upload
+
+Operator-confirmed: re-uploading a problem that already exists **overwrites** it. It does not
+duplicate and does not skip. This closes the `UNVERIFIED` in the Scraper's §5 ("whether it skips
+or overwrites a match is server-side").
+
+Consequences for Maestro, not for either toolkit:
+
+- **No duplicate risk on retry.** Good — a resumed run cannot litter the catalogue.
+- **But stage 6 is destructive, not a safe no-op.** Re-running a batch re-uploads and replaces
+  every problem in the parent folder. There is no per-problem upload flag; `--apply` submits
+  everything the platform detected (`:158-161`).
+- **So the parent folder is Maestro's selection mechanism.** On retry, Maestro must rebuild the
+  parent containing *only* the problems that still need uploading — driven by the per-problem
+  `exists` from Addendum 1A plus its own job state. Re-pointing at the original parent is wrong.
+
+### The open question this creates — highest priority for the operator
+
+**Does the overwrite wipe the ElectiCode-side edit-modal fields?**
+
+The upload carries the S3/package payload (statement, tests, solution, checker). The edit modal's
+`displayName`, `displayDescription`, `editorial`, `difficulty`, `category`, `olympiad*` and sample
+test cases are **DB fields, separate from the read-only S3 metadata** (`electicode-fields.md` §3).
+
+If an overwrite preserves them, retry is cheap and safe. If it wipes them, then **a stage-6 retry
+after stage 7 has run silently destroys every post-upload chore** — and the whole reset-vs-add tag
+design becomes moot, because the tags are gone before tag mode is even chosen.
+
+**Test, using the throwaway problem rather than production data:**
+
+1. `--apply` upload `edu-testing-best-stretch` (new, so nothing is at risk)
+2. In the admin UI, set its difficulty to `Medium` and category to `test-marker`
+3. Re-upload the identical folder with `--apply`
+4. Re-open the edit modal — did `Medium` / `test-marker` survive?
+
+Survives → stage 6 is safely re-runnable. Wiped → Maestro must never re-upload a problem past
+stage 7, and the job store has to enforce that as a hard invariant.
