@@ -30,8 +30,12 @@ reorder the Scraper's Phase 2 work toward correctness before observability.
 - **`docs/analysis/maestro-understanding.md`** — analysis of that plan: the two-level state
   machine, the hand-off seam risk, identity mapping, concurrency constraints
 - **`docs/analysis/phase1-findings.md`** — what the three Phase 1 reports say when read
-  against each other: the seam verdict, the identity hole, and four cross-actor contradictions
-  no single actor could see
+  against each other: the identity hole and four cross-actor contradictions no single actor
+  could see
+- **`docs/analysis/seam-verdict.md`** — the Polygon → ElectiCode hand-off, diffed from both
+  repos directly, plus the slug-derivation finding that adds a reconcile stage
+- **`docs/analysis/resolved-questions.md`** — the two gating questions answered empirically
+  (both clear), and the retry trap and fail-silent tag path that answering them exposed
 - **`docs/contracts/`** — the problem-developer's authoring contract (output contract,
   characteristics spec, manifest spec, preflight checklist, system prompt, tool spec)
 - **`docs/prompts/`** — the briefs originally sent to each actor

@@ -125,7 +125,11 @@ spec wins on **semantics** — the closed vocabulary, the difficulty rubric, the
 amendments are policy the parser does not enforce and should not. Maestro validates the
 intersection *before* invoking `batch.py`, and never relies on `batch.py` to reject a bad file.
 
-### C-2 · Validator and second solution vs. Polygon verify — potentially 100 % fatal
+### C-2 · Validator and second solution vs. Polygon verify — **RESOLVED, not a blocker**
+
+> **Answered empirically.** Verify passes with one solution and no validator; 220/220 existing
+> problems have `READY` verified packages. See `resolved-questions.md`. The text below records
+> the original concern and why it was worth checking.
 
 The developer is unambiguous: **no `validator.cpp` is ever produced** (validator slot empty on
 every problem ever delivered), and **exactly one solution ships** — the Python reference is never
@@ -138,7 +142,10 @@ If it does, stage 4 fails on **every problem, permanently**, and the fix is a la
 problems are authored — not a Maestro change at all. This is a single empirical question that
 gates the entire pipeline and nobody has answered it. It is the first thing to resolve. See §7.
 
-### C-3 · Sample tests: double-import or zero-import
+### C-3 · Sample tests: double-import or zero-import — **RESOLVED, works**
+
+> **Confirmed in code and in Polygon.** `input_s0_*.txt` → group `"0"` → `useInStatements: true`.
+> The authoring contract's mandatory-`s0` rule closes the one caveat. See `resolved-questions.md`.
 
 The developer's D-01 pins `samples_in_testset: true` — `s0` files ship inside `testset/`. Their
 statement format deliberately omits `\textbf{Example input}` / `\textbf{Example output}` blocks
