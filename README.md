@@ -43,17 +43,18 @@ reorder the Scraper's Phase 2 work toward correctness before observability.
   are compatible; the six silent-failure edges are what Maestro has to check itself
 - **`docs/contracts/`** — the problem-developer's authoring contract (output contract,
   characteristics spec, manifest spec, preflight checklist, system prompt, tool spec)
-- **`docs/prompts/`** — the briefs originally sent to each actor
+- **`docs/prompts/`** — the briefs sent to each actor, plus the Phase 2 corrections
+- **`docs/procedures/`** — operator-run procedures needing a live session
 
 ## Next steps
 
 Design questions are settled. Everything below is build work.
 
-1. One preview-mode test upload of a hand-shaped folder, to close the three server-side
-   unknowns in `seam-verdict.md` §4 (statement images, `solutions/main.cpp` naming, whether the
-   extra `statements/` subdirectories are tolerated).
-2. Phase 2 in both apps, correctness items first — exact-match slug resolution and the
-   `--char` audit ahead of `--json`; async job model and per-error codes on the Middleman.
+1. **Run 0 of `docs/procedures/shaping-test-upload.md`** — one non-mutating preview upload of
+   the raw Polygon package. If ElectiCode accepts it as-is, the shaping stage collapses to
+   extract + rename + prune and most of `seam-verdict.md` §4 disappears.
+2. Phase 2 in both apps, correctness items first, with the corrections in
+   `docs/prompts/phase2-corrections.md` sent alongside the go-ahead.
 3. Build order: job store → Polygon lane → shaping stage → upload → **stage 6.5 reconcile** →
    post-upload chores → audit gate → dashboard.
 
