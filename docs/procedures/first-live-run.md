@@ -39,16 +39,52 @@ Then edit `config.json`. The three that matter:
 
 | key | value |
 |---|---|
-| `scraper_repo` | path to the platform-scraper checkout |
+| `scraper_repo` | the platform-scraper **checkout root** — the folder holding `problem_uploader.py`, `batch.py`, `report.py`. **Not** its `output/` subfolder, which is where the Scraper *writes* results. |
 | `scraper_state` | path to `session_state.json` |
-| `watch_dir` | the folder you will drop set folders into |
+| `watch_dir` | the folder you drop *set folders* into (see below) |
 
 **Leave `apply` as `false`.** That is the whole point of the first run: every stage that would
 write parks and waits for you.
 
+Then check it before starting anything:
+
+```
+python -m maestro check
+```
+
+It validates every path, names each problem, and tells you how many set folders it can see.
+A wrong `scraper_repo` would otherwise surface minutes into a run as a subprocess failing to
+open a file.
+
 ## 2 · Ingest only — prove the gate works before trusting it
 
-Drop the set folder into `watch_dir`, then:
+### What a "set folder" is
+
+**A folder, not a zip.** The problem-developer delivers a *set* — several problems plus the
+metadata describing them — and `watch_dir` holds one folder per set:
+
+```
+watch_dir/
+└── edu-arrays-20260725/               ← the set folder. This is what you drop in.
+    ├── edu-arrays-running-max.zip     ← one .zip per problem, named for its slug
+    ├── edu-arrays-largest-gap.zip
+    ├── characteristics.md             ← the whole set's metadata: difficulty, tags, TL/ML
+    ├── PREFLIGHT_REPORT.md            ← the author's own self-check
+    └── MANIFEST.json                  ← written LAST. Its presence means "this set is final."
+```
+
+A single `.zip` on its own is one *problem*, not a set — Maestro would not see it, because the
+sweep only looks at immediate subdirectories of `watch_dir`.
+
+`MANIFEST.json` is the **completion sentinel**, and it is why you can drop a folder that is
+still copying: the author writes it last, atomically, only after a passing preflight. Until it
+appears, Maestro reports the folder as *incomplete* and re-checks on the next tick rather than
+ingesting a half-copied set. That is also why the manifest is never inside an archive — it
+describes them from outside.
+
+### Drop it in
+
+Copy the set folder into `watch_dir`, then:
 
 ```
 python -m maestro run --max-ticks 1

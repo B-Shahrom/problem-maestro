@@ -61,9 +61,53 @@ def load_config(path: str | Path) -> dict:
     return {**DEFAULTS, **raw}
 
 
-def build(cfg: dict) -> tuple[Scheduler, Store]:
-    if not cfg["scraper_repo"]:
-        raise SystemExit("config needs `scraper_repo` — the path to the platform-scraper checkout")
+#: The Scraper tools Maestro actually invokes. Checked at startup because the
+#: alternative is a subprocess failing with "can't open file" some minutes into a
+#: run, naming a path the operator has to work backwards from.
+REQUIRED_TOOLS = ("problem_uploader.py", "problem_scraper.py", "contest_scraper.py",
+                  "batch.py", "report.py")
+
+
+def check_paths(cfg: dict) -> list[str]:
+    """Everything wrong with the configured paths, in one go.
+
+    All of it is local and cheap, and every item here is something that would
+    otherwise surface later as a failure whose message points at a symptom rather
+    than at the config line that caused it.
+    """
+    problems: list[str] = []
+
+    repo = cfg["scraper_repo"]
+    if not repo:
+        problems.append("`scraper_repo` is not set — it is the path to the platform-scraper "
+                        "checkout (the folder holding problem_uploader.py, batch.py, …)")
+    else:
+        path = Path(repo)
+        if missing := [t for t in REQUIRED_TOOLS if not (path / t).is_file()]:
+            hint = ""
+            # The common mistake: pointing at `output/`, which is where the
+            # Scraper *writes* results, not where its tools live.
+            if all((path.parent / t).is_file() for t in REQUIRED_TOOLS):
+                hint = f"\n    Did you mean its parent? {path.parent}"
+            problems.append(f"`scraper_repo` {path} is missing {', '.join(missing)}{hint}")
+
+    state = Path(cfg["scraper_state"])
+    if not state.is_file():
+        problems.append(f"`scraper_state` {state} does not exist — log in with "
+                        "`contest_scraper.py login --url …` to create it")
+
+    watch = cfg["watch_dir"]
+    if watch and not Path(watch).is_dir():
+        # Otherwise the sweep finds nothing and reports nothing, and a set dropped
+        # into the folder the operator *meant* is never picked up.
+        problems.append(f"`watch_dir` {watch} is not a directory")
+
+    return problems
+
+
+def build(cfg: dict, *, check: bool = True) -> tuple[Scheduler, Store]:
+    if check and (problems := check_paths(cfg)):
+        raise SystemExit("config problems:\n  - " + "\n  - ".join(problems))
     store = Store(cfg["db"])
     middleman = PolygonClient(cfg["middleman_url"])
     scraper = ScraperClient(cfg["scraper_repo"], cfg["scraper_state"],
@@ -125,6 +169,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 1 if any(r.status in (RunStatus.BLOCKED, RunStatus.FAILED) for r in runs) else 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Validate the config without starting anything. Run this first."""
+    cfg = load_config(args.config)
+    if problems := check_paths(cfg):
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+    gate = "writes ENABLED" if cfg["apply"] else "preview only"
+    print(f"config OK — {gate}, dashboard on "
+          f"{cfg['dashboard_host']}:{cfg['dashboard_port']}", file=sys.stderr)
+    if cfg["watch_dir"]:
+        sets = sorted(p.name for p in Path(cfg["watch_dir"]).iterdir() if p.is_dir())
+        print(f"watching {cfg['watch_dir']} — {len(sets)} set folder(s): "
+              f"{', '.join(sets) or '(none yet)'}", file=sys.stderr)
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     path = Path(args.config)
     if path.exists():
@@ -146,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
+    sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
 
     args = parser.parse_args(argv)
     return args.func(args)
