@@ -64,6 +64,7 @@ Polygon import/build/download, ElectiCode upload, reconcile, chores and audit wi
 intervention, and parks for a human at every point where it should.
 
 What remains is not code — it's the first supervised end-to-end run against live services.
+The procedure for that is `docs/procedures/first-live-run.md`.
 
 ## Running it
 
