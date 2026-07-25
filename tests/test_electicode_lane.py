@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from maestro.electicode_lane import RETRY_CAP, ChoreGroup, ElectiCodeLane, chore_groups
+from maestro.electicode_lane import (RETRY_CAP, ChoreGroup, ElectiCodeLane, chore_groups,
+                                     stage_key, stage_progress, stage_retryable)
 from maestro.model import (BlockReason, Problem, ProblemSeed, ProblemStage,
                            ProblemStatus, RunStage, RunStatus)
 from maestro.scraper import ScraperClient
@@ -31,8 +32,10 @@ class FakeScraper:
         self.apply_rc = 0         # the mutating pass
         self.scrape_rc = 0
         self.chores_rc = 0
-        self.chore_steps = 2                  # how many steps batch.py planned
+        self.chore_plan = [("metadata", "metadata"), ("division", "division")]
+        self.chore_steps = None               # override the start event's `total`
         self.chore_warnings: list[str] = []
+        self.fail_at = "division"             # which stage stops on a non-zero rc
         self.audit_rc = 0
         self.exists: set[str] = set()
         self.overwrite_names: dict[str, str] = {}
@@ -71,8 +74,12 @@ class FakeScraper:
         ndjson = "\n".join(json.dumps(o) for o in out) + "\n"
         if "--apply" not in argv:
             return self.upload_rc, ndjson, ""
+        # The tool refuses when a requested slug isn't among the detected rows.
+        want = [s for s in self._opt(argv, "--only").split(",") if s]
+        if missing := [s for s in want if s not in names]:
+            return 2, ndjson, f"--only: not detected: {', '.join(missing)}\n"
         if self.apply_rc == 0:
-            self.uploaded = names
+            self.uploaded = want or names
         return self.apply_rc, ndjson, ""
 
     def _problem_scraper(self, argv):
@@ -84,12 +91,24 @@ class FakeScraper:
         return self.scrape_rc, "", ""
 
     def _batch(self, argv):
+        """Runs the plan minus --skip, stopping at `fail_at` (--stop-on-error)."""
         rc = self.chores_rc.pop(0) if isinstance(self.chores_rc, list) else self.chores_rc
+        skipped = set(self._opt(argv, "--skip").split(",")) - {""}
+        plan = [s for s in self.chore_plan if s[1] not in skipped]
         start = {"event": "start", "tool": "batch", "op": "run",
-                 "total": self.chore_steps, "apply": True}
+                 "total": len(plan) if self.chore_steps is None else self.chore_steps,
+                 "apply": "--apply" in argv}
         if self.chore_warnings:
             start["warnings"] = self.chore_warnings
-        return rc, json.dumps(start) + "\n", "step failed\n"
+        out = [start]
+        for name, key in plan:
+            ok = not (rc and key == self.fail_at)
+            out.append({"event": "item", "tool": "batch", "op": "run", "id": name,
+                        "ok": ok, "status": "ok" if ok else "failed",
+                        "detail": "exit 0" if ok else "exit 2"})
+            if not ok:
+                break
+        return rc, "\n".join(json.dumps(o) for o in out) + "\n", "step failed\n"
 
     def _report(self, argv):
         out = Path(self._opt(argv, "--output"))
@@ -215,6 +234,25 @@ def test_a_title_collision_stops_before_apply(lane):
     assert run.status is RunStatus.FAILED
     assert "Someone Else's Problem" in run.error
     assert not any("--apply" in c for c in fake.calls)
+
+
+def test_the_apply_pass_ticks_only_this_run_s_slugs(lane):
+    lane_, store, fake, run_id = lane
+    lane_.step(run_id)
+    apply = next(c for c in fake.calls if "--apply" in c)
+    assert sorted(apply[apply.index("--only") + 1].split(",")) == sorted(SLUGS)
+
+
+def test_a_foreign_folder_warns_but_does_not_stop_the_upload(lane):
+    """`--only` unticks it, so the risk is gone; the disagreement still matters."""
+    lane_, store, fake, run_id = lane
+    fake.detect_only = [*SLUGS, "someone-elses-problem"]
+    report = lane_.step(run_id)
+    assert report.run_advanced_to is RunStage.RECONCILE
+    warned = [e["message"] for e in store.events(run_id) if e["level"] == "warn"]
+    assert any("someone-elses-problem" in m for m in warned)
+    apply = next(c for c in fake.calls if "--apply" in c)
+    assert "someone-elses-problem" not in apply[apply.index("--only") + 1]
 
 
 def test_an_empty_detection_stops_before_apply(lane):
@@ -357,40 +395,112 @@ def test_existed_before_upload_is_written_once(lane):
     assert modes in ({"reset"}, set())
 
 
-def test_an_append_group_is_not_retried(lane):
+def test_an_appending_metadata_stage_is_not_retried(lane):
     """`_append_value` never de-dupes, so a repeat yields "arrays, arrays"."""
     lane_, store, fake, run_id = lane
     fake.exists = set(SLUGS)                  # every problem takes --tags-mode add
-    fake.chores_rc = 2
+    fake.chores_rc, fake.fail_at = 2, "metadata"
     _drive(lane_, store, run_id, stages=3)
     run = store.get_run(run_id)
     assert run.status is RunStatus.FAILED
-    assert "not idempotent" in run.error
+    assert "not idempotent" in run.error and "metadata" in run.error
     assert len([c for c in fake.calls if c[1].endswith("batch.py")]) == 1
 
 
-def test_an_overwrite_group_is_retried(lane):
+def test_an_overwriting_metadata_stage_is_retried(lane):
     """`--tags-mode reset` re-fills a fixed value, so a repeat converges."""
     lane_, store, fake, run_id = lane
-    fake.chores_rc = 2                        # no problem existed → one 'fresh' group
+    fake.chores_rc, fake.fail_at = 2, "metadata"
     _drive(lane_, store, run_id, stages=3)
     assert store.get_run(run_id).status is RunStatus.RUNNING
-    assert len([c for c in fake.calls if c[1].endswith("batch.py")]) == 1
 
 
-def test_a_list_url_makes_even_an_overwrite_group_unretryable(lane):
+def test_a_division_failure_is_retried_even_in_an_append_group(lane):
+    """`division set` is declarative, so the group's tag mode is irrelevant to it."""
+    lane_, store, fake, run_id = lane
+    fake.exists = set(SLUGS)
+    fake.chores_rc, fake.fail_at = 2, "division"
+    _drive(lane_, store, run_id, stages=3)
+    assert store.get_run(run_id).status is RunStatus.RUNNING
+
+
+def test_a_resumed_chain_skips_the_stages_that_landed(lane):
+    """Otherwise the retry re-appends tags that were already applied."""
+    lane_, store, fake, run_id = lane
+    fake.exists = set(SLUGS)
+    fake.chores_rc, fake.fail_at = [2, 0], "division"
+    _drive(lane_, store, run_id, stages=3)     # metadata ok, division fails
+    lane_.step(run_id)                         # retry
+
+    runs = [c for c in fake.calls if c[1].endswith("batch.py")]
+    assert "--skip" not in runs[0]
+    assert runs[1][runs[1].index("--skip") + 1] == "metadata"
+    assert store.get_run(run_id).stage is RunStage.AUDIT
+
+
+def test_a_list_add_failure_is_not_retried(lane):
     """`list add` de-dupes against row titles while being handed slugs."""
     lane_, store, fake, run_id = lane
     lane_.list_url = "https://www.electicode.com/en/admin/contests/1/manage"
-    fake.chores_rc = 2
+    fake.chore_plan = [("metadata", "metadata"), ("list add", "list-add")]
+    fake.chores_rc, fake.fail_at = 2, "list-add"
     _drive(lane_, store, run_id, stages=3)
-    assert store.get_run(run_id).status is RunStatus.FAILED
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "list-add" in run.error
+
+
+def test_an_unattributable_failure_is_not_retried(lane):
+    """A stage Maestro cannot name is a stage it knows nothing about replaying."""
+    lane_, store, fake, run_id = lane
+    fake.chore_plan = [("some new stage", "whatever")]
+    fake.chores_rc, fake.fail_at = 2, "whatever"
+    _drive(lane_, store, run_id, stages=3)
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "unknown" in run.error
+
+
+# ------------------------------------------------------- stage bookkeeping
+
+
+def test_stage_names_map_to_the_keys_only_skip_understands():
+    assert stage_key("fixmdx (subtasks)") == "fixmdx"
+    assert stage_key("fixmdx (all)") == "fixmdx"
+    assert stage_key("list add") == "list-add"
+    assert stage_key("list reorder") == "list-reorder"
+    assert stage_key("metadata") == "metadata"
+    assert stage_key("something else") is None
+
+
+def test_stage_progress_reads_the_prefix_and_the_failure():
+    evts = [{"event": "start", "total": 3},
+            {"event": "item", "id": "metadata", "ok": True},
+            {"event": "item", "id": "division", "ok": False}]
+    assert stage_progress(evts) == (["metadata"], "division")
+
+
+def test_stage_progress_ignores_a_stage_it_cannot_name():
+    """An unnameable stage is neither skipped later nor called a known failure."""
+    evts = [{"event": "item", "id": "brand new", "ok": True},
+            {"event": "item", "id": "also new", "ok": False}]
+    assert stage_progress(evts) == ([], None)
+
+
+def test_only_metadata_depends_on_the_tag_mode():
+    assert stage_retryable("metadata", "reset") is True
+    assert stage_retryable("metadata", "add") is False
+    assert stage_retryable("division", "add") is True
+    assert stage_retryable("list-add", "reset") is False
+    assert stage_retryable("custom", "reset") is False
+    assert stage_retryable(None, "reset") is False
 
 
 def test_resuming_a_failed_run_skips_the_group_that_landed(lane):
     """The operator clears the failure; the completed group must not run twice."""
     lane_, store, fake, run_id = lane
     fake.exists = {SLUGS[1]}
+    fake.fail_at = "metadata"                 # in an `add` group: stops for a human
     fake.chores_rc = [0, 2, 0]                # fresh ok, existing fails, then ok
     _drive(lane_, store, run_id, stages=3)
     assert store.get_run(run_id).status is RunStatus.FAILED

@@ -1,7 +1,4 @@
-import json
 from pathlib import Path
-
-import pytest
 
 from maestro.scraper import (Detected, Outcome, ScraperClient, _default_runner,
                              catalog, detected, events, interpret)

@@ -22,7 +22,6 @@ flag explicitly and defaults to preview. `--apply` is never inferred.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -185,14 +184,22 @@ class ScraperClient:
 
     # --------------------------------------------------------------- upload
 
-    def upload(self, folder: str | Path, output: str | Path, *, apply: bool = False) -> Result:
+    def upload(self, folder: str | Path, output: str | Path, *, apply: bool = False,
+               only: list[str] | None = None) -> Result:
         """Stage 6. Hand a parent folder to the platform's upload modal.
 
         Preview (`apply=False`) is what tells Maestro which problems already
         exist, so it always runs first — the answer cannot be derived locally.
+
+        `only` names the rows to tick, unticking the rest, and the tool refuses
+        (exit `2`) if any named slug is not among the detected problems. That is a
+        second, independent check of the same thing the lane verifies from the
+        preview, made by the code that can actually see the modal.
         """
         args = ["--base", self.base, "--folder", str(Path(folder).resolve()),
                 "--output", str(Path(output).resolve()), "--json"]
+        if only:
+            args += ["--only", ",".join(only)]
         if apply:
             args.append("--apply")
         # The tool waits up to its own `--upload-timeout` (600s by default) for the
@@ -238,7 +245,8 @@ class ScraperClient:
 
     def chores(self, char: str | Path, *, tags_mode: str, apply: bool = False,
                divisions: str = "", targets: str = "", list_url: str = "",
-               fixmdx: str = "subtasks", stop_on_error: bool = True) -> Result:
+               fixmdx: str = "subtasks", stop_on_error: bool = True,
+               skip: str = "") -> Result:
         """Stage 7. Difficulty, tags, divisions, MDX repair, translation, listing.
 
         `tags_mode` is a **whole-run** setting on the Scraper's side, which is why
@@ -247,6 +255,11 @@ class ScraperClient:
         `stop_on_error` defaults on: the steps are ordered, and continuing past a
         failed one produces a partially-chored batch that the audit then reports
         as several unrelated gaps.
+
+        `skip` is a comma list of stage keys already known to have run. It is what
+        makes a resumed chore chain safe — several of the stages cannot be
+        replayed (see `stage_retryable`), so a retry has to start where the last
+        attempt stopped rather than at the top.
         """
         args = ["--base", self.base, "--char", str(Path(char).resolve()),
                 "--tags-mode", tags_mode, "--fixmdx", fixmdx, "--json"]
@@ -256,6 +269,8 @@ class ScraperClient:
             args += ["--targets", targets]
         if list_url:
             args += ["--list-url", list_url]
+        if skip:
+            args += ["--skip", skip]
         if stop_on_error:
             args.append("--stop-on-error")
         if apply:

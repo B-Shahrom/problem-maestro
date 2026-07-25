@@ -29,6 +29,7 @@ one invocation. The lane splits the characteristics file instead.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,21 +69,78 @@ class ChoreGroup:
     tags_mode: str
     slugs: list[str]
 
-    @property
-    def retry_safe(self) -> bool:
-        """Whether re-running this group after a partial failure is harmless.
 
-        `--tags-mode reset` fills the category field with a fixed value, so a
-        repeat converges. `--tags-mode add` appends through `_append_value`, which
-        joins with `", "` and never de-dupes — a problem that was saved before the
-        step failed comes back as `"arrays, arrays"`. There is no way to retry
-        only the unsaved ones either: `batch run --json` reports one event per
-        *stage*, not per problem, and it does not forward its sub-tools' streams.
+#: `batch run` reports each stage's `item` event under the plan's display *name*,
+#: while `--only`/`--skip` address stages by *key*. Mapping one to the other is
+#: what lets a failed chain resume, so it is explicit rather than derived: an
+#: unrecognised name yields no key, and a stage Maestro cannot name it also will
+#: not skip. That is the safe direction — the cost is re-running a chain from the
+#: top, and the alternative is skipping a stage that never ran.
+_STAGE_KEYS = {
+    "fixmdx": "fixmdx",           # the display name carries its scope: "fixmdx (all)"
+    "translate": "translate",
+    "metadata": "metadata",
+    "custom": "custom",
+    "division": "division",
+    "list add": "list-add",
+    "list reorder": "list-reorder",
+}
 
-        So this group fails to a human instead of retrying. Silent tag
-        duplication on the problems that already worked is worse than a stop.
-        """
-        return self.tags_mode != "add"
+#: Which stages survive being run twice (CLI contract §7). `metadata` is the one
+#: that depends on how it was invoked: `--tags-mode reset` re-fills a fixed value
+#: and converges, while `add` appends through a helper that never de-dupes.
+_REPLAYABLE = {
+    "fixmdx": True,        # compares against the current text and skips the save
+    "translate": True,     # re-translates and re-saves; nothing accumulates
+    "metadata": None,      # → depends on tags_mode
+    "custom": False,       # --category-prepend appends without de-duping
+    "division": True,      # declarative: set to exactly this set, verify, done
+    "list-add": False,     # de-dupes slugs against row titles, so almost never
+    "list-reorder": True,  # a completed reorder plans no moves
+}
+
+
+def stage_key(name: str) -> str | None:
+    for prefix, key in _STAGE_KEYS.items():
+        if name == prefix or name.startswith(prefix + " ("):
+            return key
+    return None
+
+
+def stage_progress(evts: list[dict] | None) -> tuple[list[str], str | None]:
+    """`(stage keys that completed, the key of the one that failed)`.
+
+    With `--stop-on-error` the run halts at the first failure, so the stream is a
+    prefix of the plan and the last event is the failure. A stage whose name does
+    not map is reported as neither — it is not skipped on the retry, and it is not
+    treated as a known-safe failure either.
+    """
+    done: list[str] = []
+    failed: str | None = None
+    for e in evts or []:
+        if e.get("event") != "item":
+            continue
+        key = stage_key((e.get("id") or "").strip())
+        if e.get("ok"):
+            if key:
+                done.append(key)
+        elif failed is None:
+            failed = key
+    return done, failed
+
+
+def stage_retryable(failed: str | None, tags_mode: str) -> bool:
+    """Whether re-running the stage that failed is safe.
+
+    Unknown (`None`) is not retryable: it means the failure could not be
+    attributed to a stage, so nothing is known about replaying it.
+    """
+    if failed is None:
+        return False
+    replayable = _REPLAYABLE.get(failed)
+    if replayable is None:
+        return failed == "metadata" and tags_mode != "add"
+    return replayable
 
 
 def _did_nothing(evts: list[dict] | None) -> str | None:
@@ -169,6 +227,25 @@ class ElectiCodeLane:
         d = self.run_dir(run_id) / "electicode"
         d.mkdir(parents=True, exist_ok=True)
         return d / name
+
+    def _stages_done(self, run_id: int, group: ChoreGroup,
+                     add: list[str] | None = None) -> list[str]:
+        """Read, or extend, the stages this group has already completed.
+
+        Kept on disk rather than in the job store because it is scoped to one
+        group's chore chain and is as much an operator artefact as orchestrator
+        state — when a run stops mid-chain, this file is the answer to "how far
+        did it get".
+        """
+        path = self.artefact(run_id, f"chores-{group.name}-done.json")
+        try:
+            done = [k for k in json.loads(path.read_text(encoding="utf-8")) if isinstance(k, str)]
+        except (OSError, ValueError, TypeError):
+            done = []
+        if add is not None:
+            done = list(dict.fromkeys(done + add))
+            path.write_text(json.dumps(done), encoding="utf-8")
+        return done
 
     @staticmethod
     def _char_path(set_dir: str | Path) -> Path:
@@ -264,7 +341,7 @@ class ElectiCodeLane:
             return
 
         rows: list[Detected] = preview.data or []
-        if problem := self._identity_error(problems, rows):
+        if problem := self._identity_error(run_id, problems, rows):
             # Refusing here is the whole point of reading the preview: past this
             # line the platform is being told to overwrite a named problem, and
             # `--apply` is not reversible by re-running anything.
@@ -282,7 +359,8 @@ class ElectiCodeLane:
                 self.store.set_problem(run_id, p.slug,
                                        existed_before_upload=by_id[p.slug].exists)
 
-        applied = self.client.upload(folder, self.artefact(run_id, "upload.json"), apply=True)
+        applied = self.client.upload(folder, self.artefact(run_id, "upload.json"),
+                                     apply=True, only=[p.slug for p in problems])
         report.ran.append("upload:apply")
         if not applied.ok:
             self._setback(run_id, applied, report, "upload")
@@ -298,14 +376,15 @@ class ElectiCodeLane:
                        f"existing entry")
         self._advance(run_id, RunStage.RECONCILE, report)
 
-    def _identity_error(self, problems: list[Problem], rows: list[Detected]) -> str | None:
+    def _identity_error(self, run_id: int, problems: list[Problem],
+                        rows: list[Detected]) -> str | None:
         """Refuse the upload unless every row is the problem Maestro meant.
 
-        Three ways this goes wrong, all silent if unchecked: the platform detects
-        fewer folders than were handed to it; a row's Problem ID is not a slug
-        this run owns; or an EXISTS row would overwrite a problem whose current
-        title is not the one Maestro expects for that slug — a genuine collision
-        with unrelated content, which the platform will happily replace.
+        The check that only exists here is the last one: an EXISTS row whose
+        `overwrite_name` is not the title Maestro expects for that slug is a
+        collision with unrelated content, and the platform will replace it without
+        complaint. `--only` cannot catch that — it matches on the Problem ID,
+        which is precisely what agrees while the content does not.
         """
         if not rows:
             return ("the upload modal reported no detected problems — refusing to "
@@ -316,11 +395,15 @@ class ElectiCodeLane:
             return (f"the platform did not detect {len(missing)} problem folder(s): "
                     f"{', '.join(missing)}")
         if extra := sorted(seen - set(expected)):
-            return (f"the platform detected {len(extra)} problem(s) this run does not "
-                    f"own: {', '.join(extra)}")
+            # Not fatal, because the apply pass passes `--only` and these rows are
+            # unticked. Still worth saying: the upload folder holds something this
+            # run did not put there, which means state and disk disagree.
+            self.store.log(run_id, "warn",
+                           f"the upload folder holds {len(extra)} problem(s) this run does "
+                           f"not own; they will not be ticked: {', '.join(extra)}")
         for r in rows:
-            if not r.selected:
-                return f"{r.id}: the modal left this row unticked, so it would not upload"
+            if r.id not in expected:
+                continue
             want = expected[r.id].title
             if r.exists and r.overwrite_name and want and r.overwrite_name != want:
                 return (f"{r.id}: would overwrite {r.overwrite_name!r}, but this run's "
@@ -395,19 +478,27 @@ class ElectiCodeLane:
                 self._fail(run_id, report, str(e))
                 return
 
+            done = self._stages_done(run_id, group)
             r = self.client.chores(
                 path, tags_mode=group.tags_mode, apply=True,
                 divisions=self.divisions, targets=self.targets,
                 list_url=self.list_url, fixmdx=self.fixmdx,
+                skip=",".join(done),
             )
             report.ran.append(f"chores:{group.name}")
             if not r.ok:
-                # `list add` is the other non-idempotent step: its de-dup compares
-                # the tokens it was handed (slugs) against the list's row *titles*,
-                # which almost never match, so a retry re-adds.
+                # A chore chain resumes at the stage that failed rather than at the
+                # top, because several of the stages cannot be replayed — a retry
+                # from the top would re-append tags and re-add list rows that
+                # already landed. Whether the *failed* stage itself may be retried
+                # is a separate question, and the answer is often no.
+                ran, failed = stage_progress(r.data)
+                self._stages_done(run_id, group, done + ran)
+                what = (f"chores for the {group.name} group "
+                        f"({len(group.slugs)} problem(s))")
                 self._setback(run_id, r, report,
-                              f"chores for the {group.name} group ({len(group.slugs)} problem(s))",
-                              retry_safe=group.retry_safe and not self.list_url)
+                              f"{what} at stage {failed or 'unknown'}",
+                              retry_safe=stage_retryable(failed, group.tags_mode))
                 return
             if noop := _did_nothing(r.data):
                 # `batch.py` exits 0 when its plan is empty and when it drops all
