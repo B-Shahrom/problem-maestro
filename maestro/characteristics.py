@@ -30,6 +30,13 @@ _TAGS_RE = re.compile(r"^##\s+Suggested tags\s*$", re.M | re.I)
 _TAG_LINE_RE = re.compile(r"^\s*\d+\.\s*(.*\S)\s*$")
 _NONE_TOKENS = {"none", "-", "", "[none]", "n/a"}
 _DIFF = {"easy": "Easy", "medium": "Medium", "hard": "Hard"}
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _number(cell: str) -> float | None:
+    """The leading number in a `2 s` / `256 MB` cell, or None if there isn't one."""
+    m = _NUM_RE.search(cell or "")
+    return float(m.group()) if m else None
 
 
 @dataclass(slots=True)
@@ -39,11 +46,29 @@ class Row:
     group: str = ""
     subtasks: str = ""
     languages: str = ""
+    tl: str = ""
+    ml: str = ""
+    """Time and memory limits, verbatim (`2 s`, `256 MB`).
+
+    `batch.py` parses neither — nothing in the ElectiCode half can set a limit,
+    because the platform renders both read-only from the imported package. They
+    are captured here purely so C-7 can cross-check them against the manifest,
+    which *is* what Maestro sends to Polygon. Two authored copies of the same
+    fact, and until C-7 nothing compared them.
+    """
 
     @property
     def difficulty(self) -> str:
         """What `batch.py` will send. An unrecognised group silently yields ''."""
         return _DIFF.get(self.group.strip().lower(), "")
+
+    @property
+    def time_limit_s(self) -> float | None:
+        return _number(self.tl)
+
+    @property
+    def memory_limit_mb(self) -> float | None:
+        return _number(self.ml)
 
     @property
     def has_subtasks(self) -> bool:
@@ -89,7 +114,8 @@ def parse(text: str) -> Characteristics:
                 if slug.strip().lower() in _NONE_TOKENS:
                     continue  # the only column whose absence drops a row
                 out.rows.append(Row(slug=slug, title=get("title"), group=get("group"),
-                                    subtasks=get("subtasks"), languages=get("languages")))
+                                    subtasks=get("subtasks"), languages=get("languages"),
+                                    tl=get("tl"), ml=get("ml")))
 
     if t := _TAGS_RE.search(text):
         start = text[: t.start()].count("\n") + 1
@@ -235,6 +261,32 @@ def precheck(char_path: str | Path, manifest: dict[str, Any]) -> list[Finding]:
             if expected and tagline.strip() != expected:
                 err("C-5", f"tag line {tagline!r} does not match the manifest's "
                            f"{expected!r} at this position", row.slug)
+
+    # C-7 — the two authored copies of the limits must agree, because only one of
+    # them is ever acted on.
+    #
+    # The manifest's `limits` is what Maestro sends to Polygon on import. The
+    # characteristics' TL/ML columns are read by nothing at all: `batch.py` does not
+    # parse them, and ElectiCode renders both fields read-only from the imported
+    # package. So a disagreement resolves silently in the manifest's favour, and the
+    # authored intent in the characteristics is lost without a trace.
+    #
+    # That matters because a wrong limit is invisible for a long time. It does not
+    # fail the import, the build, the verify, or the audit — it fails *solutions*,
+    # later, as unexplained TLEs on correct submissions.
+    for r in c.rows:
+        lim = by_slug.get(r.slug, {}).get("limits") or {}
+        for label, got, want in (("TL", r.time_limit_s, lim.get("time_limit_s")),
+                                 ("ML", r.memory_limit_mb, lim.get("memory_limit_mb"))):
+            if want is None:
+                continue
+            if got is None:
+                err("C-7", f"the manifest sets {label} {want}, but characteristics.md has no "
+                           f"readable {label} — the column is decorative, so this goes "
+                           "unnoticed", r.slug)
+            elif float(got) != float(want):
+                err("C-7", f"{label}: characteristics.md says {got:g}, the manifest says "
+                           f"{want:g} — the manifest wins and the difference is silent", r.slug)
 
     # C-6 — `languages` is captured by the parser and never used; translate targets
     # come from a single global --targets flag, so a set with mixed language sets

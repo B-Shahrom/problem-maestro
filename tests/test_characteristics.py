@@ -164,3 +164,39 @@ def test_truncated_table_surfaces_as_a_missing_slug(set_dir):
     p.write_text(CHAR.replace(last, last + "\n"), encoding="utf-8")
     f = precheck(p, mf(set_dir))
     assert any(x.check == "C-4" and x.slug == "edu-arrays-largest-gap" for x in f)
+
+
+def test_a_limit_disagreement_is_caught(set_dir, rewrite):
+    """Two authored copies of the same fact; only the manifest is ever acted on."""
+    rewrite(lambda m: m["problems"][0]["limits"].__setitem__("time_limit_s", 2))
+    f = precheck(set_dir / "characteristics.md", mf(set_dir))
+    assert [(x.check, x.slug) for x in f] == [("C-7", "edu-arrays-running-max")]
+    assert "characteristics.md says 1" in f[0].message and "manifest says 2" in f[0].message
+
+
+def test_a_memory_disagreement_is_caught(set_dir, rewrite):
+    rewrite(lambda m: m["problems"][1]["limits"].__setitem__("memory_limit_mb", 512))
+    f = precheck(set_dir / "characteristics.md", mf(set_dir))
+    assert [x.check for x in f] == ["C-7"]
+    assert "ML" in f[0].message
+
+
+def test_a_missing_tl_column_is_caught(set_dir):
+    """The column is decorative, so its absence has no other symptom."""
+    p = set_dir / "characteristics.md"
+    p.write_text(CHAR.replace("| 1 s | 256 MB |", "|  | 256 MB |"), encoding="utf-8")
+    f = precheck(p, mf(set_dir))
+    assert any(x.check == "C-7" and "no readable TL" in x.message for x in f)
+
+
+def test_limits_are_parsed_from_their_units():
+    c = parse(CHAR)
+    assert [(r.time_limit_s, r.memory_limit_mb) for r in c.rows] == [(1.0, 256.0), (1.0, 256.0)]
+
+
+def test_a_fractional_limit_parses():
+    from maestro.characteristics import _number
+    assert _number("1.5 s") == 1.5
+    assert _number("256 MB") == 256.0
+    assert _number("") is None
+    assert _number("none") is None

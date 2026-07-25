@@ -172,3 +172,30 @@ def test_importing_with_reset_is_refused():
     client = PolygonClient("http://x", transport=lambda *a: (202, b"{}"))
     with pytest.raises(ValueError, match="data loss"):
         client.import_problem(["a.zip"], on_exists="reset")
+
+
+def test_import_sends_the_limits_polygon_expects():
+    """Seconds in the manifest, milliseconds on the wire."""
+    sent = {}
+
+    def transport(method, url, body, headers):
+        sent["body"] = body
+        return 202, b'{"jobId":"j1"}'
+
+    PolygonClient("http://x", transport=transport).import_problem(
+        [], time_limit_s=2, memory_limit_mb=512)
+    body = sent["body"].decode("utf-8", "replace")
+    assert 'name="timeLimit"' in body and "\r\n\r\n2000\r\n" in body
+    assert 'name="memoryLimit"' in body and "\r\n\r\n512\r\n" in body
+
+
+def test_omitting_a_limit_sends_no_field():
+    """So the Middleman's default applies only where nothing was authored."""
+    sent = {}
+
+    def transport(method, url, body, headers):
+        sent["body"] = body
+        return 202, b'{"jobId":"j1"}'
+
+    PolygonClient("http://x", transport=transport).import_problem([])
+    assert "timeLimit" not in sent["body"].decode("utf-8", "replace")

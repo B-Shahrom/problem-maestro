@@ -22,6 +22,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import manifest
 from .model import ProblemStage, ProblemStatus, RunStage, RunStatus
 from .polygon import Action, PolygonClient, PolygonError, decide, problem_decisions
 from .store import Store
@@ -99,7 +100,12 @@ class PolygonLane:
             # A tests archive is redundant with the main one by contract, but the
             # append path exists for partial re-deliveries where it is all there is.
             archives.append(str(tests))
-        job = self.client.import_problem(archives)
+        limits = self._limits(run_id, set_dir, p.slug)
+        job = self.client.import_problem(
+            archives,
+            time_limit_s=limits.get("time_limit_s"),
+            memory_limit_mb=limits.get("memory_limit_mb"),
+        )
         self.store.set_problem(run_id, p.slug, status=ProblemStatus.RUNNING,
                                polygon_job_id=job["jobId"])
         self.store.log(run_id, "info", f"submitted job {job['jobId']}", slug=p.slug)
@@ -142,6 +148,34 @@ class PolygonLane:
                                    status=ProblemStatus.RUNNING)
             report.advanced.append(p.slug)
         return d.action
+
+    def _limits(self, run_id: int, set_dir: Path, slug: str) -> dict:
+        """This problem's authored limits, from the manifest.
+
+        Read from the manifest rather than carried on `Problem` because they are
+        input data, not run state: the manifest is authoritative and immutable for
+        the life of a run, and copying them into the store would create a second
+        place for them to be wrong.
+
+        An absent entry falls back to the Middleman's default, which is the exact
+        behaviour this exists to prevent — so it is logged rather than passed over.
+        The manifest schema requires `limits`, so reaching this means the set got
+        past a validator that should have caught it.
+        """
+        try:
+            m = manifest.load(set_dir)
+        except (OSError, ValueError) as e:
+            self.store.log(run_id, "warn",
+                           f"could not read the manifest for limits ({e}); the import will "
+                           "apply the Middleman's default", slug=slug)
+            return {}
+        entry = next((p for p in m.get("problems") or [] if p.get("slug") == slug), {})
+        if limits := entry.get("limits") or {}:
+            return limits
+        self.store.log(run_id, "warn",
+                       "no limits in the manifest; the import will apply the Middleman's "
+                       "default, which overwrites whatever the package declares", slug=slug)
+        return {}
 
     @staticmethod
     def _entry(body: dict, slug: str) -> dict:

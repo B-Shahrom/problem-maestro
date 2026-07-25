@@ -170,8 +170,22 @@ class PolygonClient:
             # folds that into VERIFY_UNKNOWN, but a proxied endpoint could still leak it.
             return status, {"detail": raw[:200].decode("utf-8", "replace")}
 
-    def import_problem(self, archives: list[str | Path], *, on_exists: str = "fill") -> dict[str, Any]:
+    def import_problem(self, archives: list[str | Path], *, on_exists: str = "fill",
+                       time_limit_s: float | None = None,
+                       memory_limit_mb: float | None = None) -> dict[str, Any]:
         """Submit archives as multipart. Returns the 202 job snapshot.
+
+        **Always pass the limits.** Omitting them does not mean "use the package's"
+        — the Middleman substitutes its own configured default and writes that to
+        Polygon through `problem.updateInfo`, overwriting whatever the archive
+        implied. A problem authored at 2 s would then run at the server default,
+        and nothing downstream would notice: it imports, builds and verifies
+        clean, and ElectiCode renders the limits read-only from the package, so
+        there is no later stage where a wrong one is visible. It surfaces
+        eventually as unexplained TLEs on correct solutions.
+
+        One job per problem is what makes this work — the endpoint takes a single
+        limit pair per request, which is exactly right at that granularity.
 
         `on_exists="fill"` is the endpoint's own default and the behaviour every
         retry in Maestro depends on: the existing problem is resolved by name and
@@ -193,7 +207,12 @@ class PolygonClient:
                 "retry into data loss."
             )
         paths = [Path(a) for a in archives]
-        body, content_type = _multipart(paths, {"onExists": on_exists})
+        fields = {"onExists": on_exists}
+        if time_limit_s is not None:
+            fields["timeLimit"] = str(int(round(time_limit_s * 1000)))  # Polygon wants ms
+        if memory_limit_mb is not None:
+            fields["memoryLimit"] = str(int(round(memory_limit_mb)))
+        body, content_type = _multipart(paths, fields)
         status, raw = self._send("POST", f"{self.base}/api/import-problem", body,
                                  {"Content-Type": content_type})
         try:

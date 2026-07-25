@@ -35,6 +35,7 @@ class FakeMiddleman:
         self.download_status = download_status
         self.jobs: dict[str, str] = {}
         self.submits: list[list[str]] = []
+        self.fields: list[dict] = []
         self._n = 0
 
     def __call__(self, method, url, body, headers=None):
@@ -42,6 +43,8 @@ class FakeMiddleman:
             names = re.findall(rb'filename="([^"]+)"', body)
             files = [n.decode() for n in names]
             self.submits.append(files)
+            self.fields.append(dict(re.findall(
+                rb'name="(\w+)"\r\n\r\n([^\r]*)\r\n', body)))
             self._n += 1
             job = f"job{self._n}"
             slug = self._slug_of(files[0])
@@ -261,3 +264,30 @@ def test_progress_survives_a_restart(lane, tmp_path):
         resumed = PolygonLane(reopened, PolygonClient(transport=fake), tmp_path / "work")
         drive(resumed, run_id)
         assert reopened.get_run(run_id).stage is RunStage.UPLOAD
+
+
+def test_the_import_carries_the_manifest_s_limits(lane):
+    """Omitting them means the Middleman's default silently overwrites the package."""
+    store, run_id, build = lane
+    ln, fake = build({s: [READY(s)] for s in SLUGS})
+    drive(ln, run_id)
+    assert fake.fields, "no import was submitted"
+    for f in fake.fields:
+        assert f[b"timeLimit"] == b"1000"     # the manifest says 1 s
+        assert f[b"memoryLimit"] == b"256"
+        assert f[b"onExists"] == b"fill"
+
+
+def test_a_manifest_without_limits_warns(lane, set_dir):
+    """Reaching this means a set got past a validator that should have caught it."""
+    store, run_id, build = lane
+    m = json.loads((set_dir / "MANIFEST.json").read_text())
+    for entry in m["problems"]:
+        entry.pop("limits", None)
+    (set_dir / "MANIFEST.json").write_text(json.dumps(m), encoding="utf-8")
+
+    ln, fake = build({s: [READY(s)] for s in SLUGS})
+    drive(ln, run_id)
+    warned = [e["message"] for e in store.events(run_id) if e["level"] == "warn"]
+    assert any("no limits in the manifest" in w for w in warned)
+    assert all(b"timeLimit" not in f for f in fake.fields)
