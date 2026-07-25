@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .electicode_lane import ElectiCodeLane
+from .checks import Severity
 from .ingest import Verdict, scan
 from .model import RunStage, RunStatus
 from .polygon_lane import PolygonLane
@@ -42,6 +43,20 @@ from .store import Store
 #: much longer makes a 25-problem batch's total latency the sum of its naps.
 BUSY_INTERVAL = 5.0
 IDLE_INTERVAL = 30.0
+
+def _why(result) -> str:
+    """The most useful single line from an inspection.
+
+    Errors first: a set with three warnings and one error is rejected for the
+    error, and leading with a warning would point at the wrong thing.
+    """
+    ranked = sorted(result.findings, key=lambda f: f.severity is not Severity.ERROR)
+    if not ranked:
+        return "no findings recorded"
+    first = ranked[0]
+    extra = f" (+{len(ranked) - 1} more)" if len(ranked) > 1 else ""
+    return f"{first.check}: {first.message}{extra}"
+
 
 _POLYGON_STAGES = (RunStage.POLYGON,)
 _ELECTICODE_STAGES = (RunStage.UPLOAD, RunStage.RECONCILE, RunStage.CHORES, RunStage.AUDIT)
@@ -56,6 +71,12 @@ class TickReport:
     electicode_busy: bool = False
     advanced: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    rejected: list[tuple[str, str, str]] = field(default_factory=list)
+    """`(folder, verdict, why)` for every candidate the sweep did not ingest.
+
+    Repeats each tick while the cause persists — an operator watching the log
+    needs the current state, not a one-off they may have missed.
+    """
 
     @property
     def idle(self) -> bool:
@@ -116,6 +137,16 @@ class Scheduler:
                       and r.stage in stages)
 
     def _ingest(self, report: TickReport) -> None:
+        """Sweep the watch folder, and say what happened to everything in it.
+
+        A candidate that is not ingested must be reported, not dropped. Silence
+        here reads to an operator as "Maestro didn't see my folder" when the truth
+        is almost always "it saw it and rejected it for a stated reason" — and the
+        reason is the one thing they need.
+
+        `ALREADY_INGESTED` is the exception: every previously-seen folder returns
+        it on every tick forever, so reporting it would bury everything else.
+        """
         if self.watch_dir is None:
             return
         try:
@@ -123,6 +154,9 @@ class Scheduler:
                                extra_tags=self.extra_tags, parser=self.parser):
                 if result.verdict is Verdict.READY and result.run_id:
                     report.ingested.append(result.set_dir.name)
+                elif result.verdict is not Verdict.ALREADY_INGESTED:
+                    report.rejected.append(
+                        (result.set_dir.name, str(result.verdict), _why(result)))
         except OSError as e:
             # The watch folder is often a network mount; a blip must not kill the
             # loop, and every run already in flight is unaffected by it.
@@ -220,11 +254,18 @@ class Scheduler:
 
     # -------------------------------------------------------------- running
 
-    def run_forever(self, *, max_ticks: int | None = None) -> None:
-        """Tick until stopped. `max_ticks` bounds it for tests and one-shot runs."""
+    def run_forever(self, *, max_ticks: int | None = None, on_tick=None) -> None:
+        """Tick until stopped. `max_ticks` bounds it for tests and one-shot runs.
+
+        `on_tick` receives each `TickReport`. The loop itself prints nothing —
+        what is worth showing depends on whether a human or a service manager is
+        watching, and that is the caller's business.
+        """
         ticks = 0
         while not self._stop.is_set():
             report = self.tick()
+            if on_tick is not None:
+                on_tick(report)
             ticks += 1
             if max_ticks is not None and ticks >= max_ticks:
                 return

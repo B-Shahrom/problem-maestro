@@ -317,3 +317,94 @@ def test_an_unreadable_watch_folder_does_not_kill_the_loop(sched, monkeypatch):
     report = s.tick()
     assert any("watch folder unreadable" in e for e in report.errors)
     assert polygon.calls == [run_id], "runs in flight must be unaffected"
+
+
+def test_a_freshly_ingested_set_is_picked_up_by_the_next_tick(tmp_path, set_dir):
+    """End to end: drop a folder in, and it reaches a lane without a nudge.
+
+    The gap this closes was invisible to every other test, because the lane
+    fixtures set RunStage.POLYGON by hand — so nothing exercised the handoff from
+    ingest, and a real run sat at `ingest` forever.
+    """
+    import shutil
+
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    shutil.copytree(set_dir, watch / set_dir.name)
+
+    store = Store(tmp_path / "m.db")
+    polygon, electi = FakeLane(), FakeLane()
+    s = Scheduler(store, polygon, electi, watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01)
+    try:
+        first = s.tick()
+        assert first.ingested == [set_dir.name]
+        run_id = store.list_runs()[0].id
+        assert store.get_run(run_id).stage is RunStage.POLYGON
+
+        assert s.tick().polygon == [run_id], "the ingested run never reached a lane"
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_a_rejected_folder_is_reported_not_dropped(tmp_path):
+    """Silence reads as "Maestro didn't see it" when the truth is a stated reason."""
+    watch = tmp_path / "watch"
+    (watch / "half-copied").mkdir(parents=True)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01)
+    try:
+        report = s.tick()
+        assert report.ingested == []
+        assert len(report.rejected) == 1
+        name, verdict, why = report.rejected[0]
+        assert (name, verdict) == ("half-copied", "incomplete")
+        assert "MANIFEST.json" in why
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_an_already_ingested_folder_is_not_reported_every_tick(tmp_path, set_dir):
+    """It would return forever and bury everything else in the log."""
+    import shutil
+
+    watch = tmp_path / "watch"
+    watch.mkdir()
+    shutil.copytree(set_dir, watch / set_dir.name)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01)
+    try:
+        s.tick()
+        assert s.tick().rejected == []
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_the_rejection_reason_leads_with_the_error(tmp_path):
+    """A set with three warnings and one error is rejected for the error."""
+    from maestro.checks import Finding, Severity
+    from maestro.ingest import Inspection, Verdict
+    from maestro.scheduler import _why
+
+    result = Inspection(Path("x"), Verdict.INVALID, [
+        Finding("C-2", Severity.WARN, "no suggested tags"),
+        Finding("M-9", Severity.ERROR, "tag 'dp' is outside the vocabulary"),
+        Finding("C-6", Severity.WARN, "mixed language sets"),
+    ])
+    why = _why(result)
+    assert why.startswith("M-9: tag 'dp'")
+    assert "(+2 more)" in why
+
+
+def test_a_rejection_with_no_findings_still_says_something(tmp_path):
+    from maestro.ingest import Inspection, Verdict
+    from maestro.scheduler import _why
+
+    assert _why(Inspection(Path("x"), Verdict.INVALID, [])) == "no findings recorded"

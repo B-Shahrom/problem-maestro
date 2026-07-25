@@ -36,7 +36,7 @@ from typing import Any
 from .characteristics import precheck
 from .checks import Finding, Severity, errors
 from .manifest import validate
-from .model import ProblemSeed
+from .model import ProblemSeed, RunStage, RunStatus
 from .preflight import compare
 from .store import Store
 
@@ -171,6 +171,10 @@ def ingest(set_dir: str | Path, store: Store, *, extra_tags: set[str] | None = N
         for i, p in enumerate(m.get("problems", []))
     ]
     run_id = store.create_run(m["set"]["name"], set_dir, seeds)
+    # A registered run *is* a completed ingest — the stage's whole job was to
+    # decide whether this folder is worth working, and it said yes. Leaving it at
+    # INGEST would park it where no lane looks, so nothing would ever pick it up.
+    store.set_run(run_id, stage=RunStage.POLYGON, status=RunStatus.RUNNING)
     store.log(run_id, "info", f"ingested {len(seeds)} problem(s) from {Path(set_dir).name}")
     for f in result.findings:  # warnings survive ingest and belong in the record
         store.log(run_id, "warn", str(f), slug=f.slug)

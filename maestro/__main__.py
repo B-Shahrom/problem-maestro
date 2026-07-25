@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
+from .ingest import Verdict, inspect
 from .model import RunStatus
 from .polygon import PolygonClient
 from .polygon_lane import PolygonLane
@@ -141,8 +142,25 @@ def cmd_run(args: argparse.Namespace) -> int:
         scheduler.stop()
 
     signal.signal(signal.SIGTERM, bye)
+    seen: set[str] = set()
+
+    def narrate(report) -> None:
+        """Print what changed, once. A quiet loop is indistinguishable from a stuck one."""
+        for name in report.ingested:
+            print(f"ingested {name}", file=sys.stderr)
+        for name, verdict, why in report.rejected:
+            # Rejections repeat every tick while the cause persists, so print each
+            # distinct one once rather than every five seconds.
+            if (line := f"{name}: {verdict} — {why}") not in seen:
+                seen.add(line)
+                print(f"[!] {line}", file=sys.stderr)
+        for item in report.advanced:
+            print(f"    {item}", file=sys.stderr)
+        for err in report.errors:
+            print(f"[!] {err}", file=sys.stderr)
+
     try:
-        scheduler.run_forever(max_ticks=args.max_ticks)
+        scheduler.run_forever(max_ticks=args.max_ticks, on_tick=narrate)
     except KeyboardInterrupt:
         print("\nstopping — waiting for any ElectiCode stage in flight…", file=sys.stderr)
         scheduler.stop()
@@ -167,6 +185,51 @@ def cmd_status(args: argparse.Namespace) -> int:
                   f"{len(r.problems):>2}p{flag}  {str(note)[:60]}")
     # Non-zero when something wants a human, so a cron or a prompt can react.
     return 1 if any(r.status in (RunStatus.BLOCKED, RunStatus.FAILED) for r in runs) else 0
+
+
+def cmd_inspect(args: argparse.Namespace) -> int:
+    """Say what Maestro makes of every folder in the watch directory.
+
+    The answer to "I dropped a set in and nothing happened". A rejected candidate
+    is never silently dropped by the scheduler either, but this reports without
+    starting anything and prints every finding rather than the first.
+    """
+    cfg = load_config(args.config)
+    if not cfg["watch_dir"]:
+        raise SystemExit("config has no `watch_dir`")
+    watch = Path(cfg["watch_dir"])
+
+    loose = sorted(p.name for p in watch.iterdir() if p.is_file())
+    folders = sorted(p for p in watch.iterdir() if p.is_dir())
+    if loose:
+        # The likeliest mistake, and it is invisible otherwise: the sweep only
+        # looks at directories, so a delivered .zip sitting here is never seen.
+        print(f"[!] {len(loose)} loose file(s) in {watch}, which are ignored — a set is a "
+              f"FOLDER of per-problem archives plus characteristics.md and MANIFEST.json:",
+              file=sys.stderr)
+        for name in loose:
+            print(f"      {name}", file=sys.stderr)
+    if not folders:
+        print(f"no set folders in {watch}", file=sys.stderr)
+        return 1
+
+    with Store(cfg["db"]) as store:
+        worst = 0
+        for folder in folders:
+            result = inspect(folder, store)
+            print(f"\n{folder.name}: {result.verdict}", file=sys.stderr)
+            for f in result.findings:
+                print(f"    {f.severity.value:<5} {f.check}"
+                      f"{' ' + f.slug if f.slug else ''}: {f.message}", file=sys.stderr)
+            if result.verdict is Verdict.READY:
+                print("    ready — the next tick will ingest it", file=sys.stderr)
+            elif result.verdict is Verdict.INCOMPLETE:
+                print("    still arriving, or MANIFEST.json is missing — Maestro will "
+                      "re-check every tick", file=sys.stderr)
+                worst = max(worst, 1)
+            elif result.verdict is Verdict.INVALID:
+                worst = 2
+    return worst
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -208,6 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
+    sub.add_parser("inspect", help="Say what Maestro makes of each watch-dir folder.").set_defaults(func=cmd_inspect)
 
     args = parser.parse_args(argv)
     return args.func(args)

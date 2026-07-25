@@ -71,6 +71,7 @@ The procedure for that is `docs/procedures/first-live-run.md`.
 ```
 python -m maestro init                 # write a starter config.json
 python -m maestro check                # validate every path before starting anything
+python -m maestro inspect              # what Maestro makes of each folder in watch_dir
 python -m maestro run                  # scheduler + dashboard on :8787
 python -m maestro status               # one-shot listing; non-zero if a run wants a human
 ```

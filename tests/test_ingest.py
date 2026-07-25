@@ -4,7 +4,7 @@ import shutil
 import pytest
 
 from maestro.ingest import Verdict, candidates, ingest, inspect, scan
-from maestro.model import RunStage
+from maestro.model import RunStage, RunStatus
 from maestro.store import Store
 
 
@@ -28,7 +28,9 @@ def test_clean_set_ingests_and_seeds_the_run(watch, store):
     assert res.verdict is Verdict.READY and res.run_id
     run = store.get_run(res.run_id)
     assert run.set_name == "edu-arrays-20260725"
-    assert run.stage is RunStage.INGEST
+    # A registered run must be where a lane will look for it, or it never starts.
+    assert run.stage is RunStage.POLYGON
+    assert run.status is RunStatus.RUNNING
     assert [p.slug for p in run.problems] == ["edu-arrays-running-max", "edu-arrays-largest-gap"]
 
 
