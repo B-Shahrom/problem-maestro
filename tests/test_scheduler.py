@@ -408,3 +408,114 @@ def test_a_rejection_with_no_findings_still_says_something(tmp_path):
     from maestro.scheduler import _why
 
     assert _why(Inspection(Path("x"), Verdict.INVALID, [])) == "no findings recorded"
+
+
+# ------------------------------------------------------- correction requests
+
+
+def _invalid_set(watch: Path, name: str = "bad-set") -> Path:
+    """A folder with a manifest that is wrong rather than merely unfinished."""
+    import json
+
+    d = watch / name
+    d.mkdir(parents=True)
+    (d / "MANIFEST.json").write_text(json.dumps({
+        "schema_version": "1.0",
+        "set": {"name": name, "problem_count": 3, "delivery": "full"},
+        "problems": [],
+    }), encoding="utf-8")
+    return d
+
+
+def test_an_invalid_set_gets_a_written_correction_request(tmp_path):
+    """The operator sees a log line; the author needs a document."""
+    from maestro import feedback
+
+    watch = tmp_path / "watch"
+    d = _invalid_set(watch)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01)
+    try:
+        report = s.tick()
+        assert report.reported == [str(feedback.path_for(d))]
+        body = feedback.path_for(d).read_text(encoding="utf-8")
+        assert "M-4" in body and "problem_count" in body
+        assert s.tick().reported == [], "an unchanged rejection must not rewrite it"
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_a_folder_mid_copy_is_not_accused_of_being_broken(tmp_path):
+    """An incomplete folder is the normal state during a drop.
+
+    Reporting one immediately would file a rejection notice against every healthy
+    delivery, which trains the author to ignore them.
+    """
+    from maestro import feedback
+
+    watch = tmp_path / "watch"
+    (watch / "arriving").mkdir(parents=True)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01, feedback_after=3)
+    try:
+        for _ in range(2):
+            assert s.tick().reported == []
+            assert not feedback.path_for(watch / "arriving").exists()
+        # …but a folder that never resolves is the most confusing failure Maestro
+        # has, so silence cannot be the end state either.
+        assert s.tick().reported == [str(feedback.path_for(watch / "arriving"))]
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_a_bad_set_is_reported_without_waiting_out_the_grace_period(tmp_path):
+    """Waiting does not fix a checksum. INVALID is decisive on the first tick."""
+    from maestro import feedback
+
+    watch = tmp_path / "watch"
+    d = _invalid_set(watch)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01, feedback_after=99)
+    try:
+        assert s.tick().reported == [str(feedback.path_for(d))]
+    finally:
+        s.stop(timeout=5)
+        store.close()
+
+
+def test_a_completed_delivery_withdraws_its_own_notice(tmp_path, set_dir):
+    """The folder finished copying; the notice beside it is now a lie."""
+    import shutil
+
+    from maestro import feedback
+
+    watch = tmp_path / "watch"
+    target = watch / set_dir.name
+    target.mkdir(parents=True)
+    # Everything but the manifest — the state that earns a notice once the grace
+    # period runs out.
+    for f in set_dir.iterdir():
+        if f.name != "MANIFEST.json":
+            shutil.copy2(f, target / f.name)
+
+    store = Store(tmp_path / "m.db")
+    s = Scheduler(store, FakeLane(), FakeLane(), watch_dir=watch,
+                  busy_interval=0.01, idle_interval=0.01, feedback_after=1)
+    try:
+        s.tick()
+        assert feedback.path_for(target).is_file()
+        shutil.copy2(set_dir / "MANIFEST.json", target / "MANIFEST.json")
+        report = s.tick()
+        assert report.ingested == [set_dir.name]
+        assert not feedback.path_for(target).exists()
+    finally:
+        s.stop(timeout=5)
+        store.close()

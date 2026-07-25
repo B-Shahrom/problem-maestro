@@ -147,3 +147,53 @@ def test_candidates_ignores_loose_files(tmp_path):
 
 def test_scan_on_missing_watch_dir_is_quiet(tmp_path, store):
     assert scan(tmp_path / "nope", store) == []
+
+
+# ------------------------------------------------- what actually got checked
+
+
+def test_a_manifest_rejection_does_not_claim_the_rest_was_checked(watch, store):
+    """The characteristics and importer checks are gated behind a clean manifest.
+
+    Reporting only the findings would make a manifest-level rejection look like a
+    complete account of what is wrong with the set, and the author would fix four
+    things and be rejected again for a fifth nobody had looked at yet.
+    """
+    d = watch / "edu-arrays-20260725"
+    m = json.loads((d / "MANIFEST.json").read_text())
+    m["set"]["problem_count"] = 99
+    (d / "MANIFEST.json").write_text(json.dumps(m))
+
+    res = inspect(d, store)
+    assert res.verdict is Verdict.INVALID
+    assert res.checked == frozenset({"manifest"})
+
+
+def test_a_clean_set_records_the_characteristics_check_as_run(watch, store):
+    res = inspect(watch / "edu-arrays-20260725", store)
+    assert res.verdict is Verdict.READY
+    assert res.checked == frozenset({"manifest", "characteristics"}), \
+        "no parser was given, so the importer pre-flight must not be claimed"
+
+
+def test_an_unreachable_importer_is_not_a_pre_flight(watch, store):
+    """Empty findings are produced by agreement and by unreachability alike."""
+    def down(_archives):
+        raise ConnectionError("connection refused")
+
+    res = inspect(watch / "edu-arrays-20260725", store, parser=down)
+    assert "importer" not in res.checked
+    assert any(f.check == "P-0" for f in res.findings)
+
+
+def test_a_reachable_importer_is_recorded_as_run(watch, store):
+    def agrees(archives):
+        return {"problems": [], "parseErrors": []}
+
+    res = inspect(watch / "edu-arrays-20260725", store, parser=agrees)
+    assert "importer" in res.checked
+
+
+def test_the_run_registered_by_ingest_carries_what_was_checked(watch, store):
+    res = ingest(watch / "edu-arrays-20260725", store)
+    assert res.run_id and res.checked == frozenset({"manifest", "characteristics"})

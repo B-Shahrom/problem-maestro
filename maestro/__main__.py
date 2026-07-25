@@ -21,6 +21,7 @@ import signal
 import sys
 from pathlib import Path
 
+from . import feedback
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
 from .ingest import Verdict, inspect
@@ -199,6 +200,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             if (line := f"{name}: {verdict} — {why}") not in seen:
                 seen.add(line)
                 print(f"[!] {line}", file=sys.stderr)
+        for path in report.reported:
+            print(f"    wrote {path}", file=sys.stderr)
         for item in report.advanced:
             print(f"    {item}", file=sys.stderr)
         for err in report.errors:
@@ -266,6 +269,14 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             for f in result.findings:
                 print(f"    {f.severity.value:<5} {f.check}"
                       f"{' ' + f.slug if f.slug else ''}: {f.message}", file=sys.stderr)
+            # Naming what did not run matters more here than in the scheduler: this
+            # command is read as a verdict on the whole set, and two of the three
+            # check families are gated behind a clean manifest.
+            if skipped := [label for key, label in feedback.FAMILIES.items()
+                           if key not in result.checked]:
+                print(f"    not checked: {'; '.join(skipped)}", file=sys.stderr)
+            if args.report and (path := feedback.write(result)) is not None:
+                print(f"    wrote {path}", file=sys.stderr)
             if result.verdict is Verdict.READY:
                 print("    ready — the next tick will ingest it", file=sys.stderr)
             elif result.verdict is Verdict.INCOMPLETE:
@@ -316,7 +327,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
-    sub.add_parser("inspect", help="Say what Maestro makes of each watch-dir folder.").set_defaults(func=cmd_inspect)
+    p_inspect = sub.add_parser("inspect", help="Say what Maestro makes of each watch-dir folder.")
+    p_inspect.add_argument("--report", action="store_true",
+                           help="Also write a correction request beside each rejected folder, "
+                                "for handing back to the author.")
+    p_inspect.set_defaults(func=cmd_inspect)
 
     args = parser.parse_args(argv)
     return args.func(args)

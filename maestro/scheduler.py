@@ -33,6 +33,7 @@ from pathlib import Path
 
 from .electicode_lane import ElectiCodeLane
 from .checks import Severity
+from . import feedback
 from .ingest import Verdict, scan
 from .model import RunStage, RunStatus
 from .polygon_lane import PolygonLane
@@ -43,6 +44,18 @@ from .store import Store
 #: much longer makes a 25-problem batch's total latency the sum of its naps.
 BUSY_INTERVAL = 5.0
 IDLE_INTERVAL = 30.0
+
+#: Ticks a folder must stay INCOMPLETE before it earns a written report.
+#:
+#: An incomplete folder is the normal state during a drop — the manifest can
+#: legitimately arrive before the archives — so reporting one immediately would
+#: file a rejection notice against every healthy delivery. It is also, if it
+#: never resolves, the single most confusing failure Maestro has: the folder
+#: simply sits there and the operator sees nothing happen. The grace period is
+#: what separates the two without needing to know how long a copy takes.
+#:
+#: INVALID skips this entirely. Waiting does not fix a bad checksum.
+FEEDBACK_AFTER = 5
 
 def _why(result) -> str:
     """The most useful single line from an inspection.
@@ -77,6 +90,12 @@ class TickReport:
     Repeats each tick while the cause persists — an operator watching the log
     needs the current state, not a one-off they may have missed.
     """
+    reported: list[str] = field(default_factory=list)
+    """Correction requests written or withdrawn this tick, by path.
+
+    Only on change. A rejection that repeats every tick writes nothing after the
+    first, so an entry here means the folder itself changed.
+    """
 
     @property
     def idle(self) -> bool:
@@ -95,6 +114,7 @@ class Scheduler:
         parser=None,
         busy_interval: float = BUSY_INTERVAL,
         idle_interval: float = IDLE_INTERVAL,
+        feedback_after: int = FEEDBACK_AFTER,
     ) -> None:
         self.store = store
         self.polygon = polygon
@@ -104,6 +124,11 @@ class Scheduler:
         self.parser = parser
         self.busy_interval = busy_interval
         self.idle_interval = idle_interval
+        self.feedback_after = feedback_after
+        self._incomplete: dict[str, int] = {}
+        """Consecutive ticks each folder has been INCOMPLETE. In-memory on
+        purpose: a restart re-arms the grace period, which is the right
+        direction to be wrong in — it delays a report, never files a false one."""
         self._worker: threading.Thread | None = None
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._stop = threading.Event()
@@ -157,10 +182,30 @@ class Scheduler:
                 elif result.verdict is not Verdict.ALREADY_INGESTED:
                     report.rejected.append(
                         (result.set_dir.name, str(result.verdict), _why(result)))
+                self._feedback(result, report)
         except OSError as e:
             # The watch folder is often a network mount; a blip must not kill the
             # loop, and every run already in flight is unaffected by it.
             report.errors.append(f"watch folder unreadable: {e}")
+
+    def _feedback(self, result, report: TickReport) -> None:
+        """Leave the author a written reason, once the reason is worth writing.
+
+        The rejection is already in the tick report and the event log, but both
+        of those are the operator's surfaces. The author is reached through a
+        chat window and has no access to either, so without a document beside the
+        folder the only path from "Maestro refused this" to "here is what to
+        change" runs through a human reading Maestro's source.
+        """
+        key = str(result.set_dir)
+        if result.verdict is Verdict.INCOMPLETE:
+            n = self._incomplete[key] = self._incomplete.get(key, 0) + 1
+            if n < self.feedback_after:
+                return
+        else:
+            self._incomplete.pop(key, None)
+        if (path := feedback.write(result)) is not None:
+            report.reported.append(str(path))
 
     def _step_polygon(self, run_id: int, report: TickReport) -> None:
         try:

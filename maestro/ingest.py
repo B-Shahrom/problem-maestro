@@ -64,6 +64,16 @@ class Inspection:
     set_name: str = ""
     run_id: int | None = None
 
+    checked: frozenset[str] = frozenset()
+    """Which check families actually ran — see `feedback.FAMILIES`.
+
+    The findings alone cannot answer this. Two of the three families are gated
+    behind a clean manifest and the third behind a reachable importer, so "no
+    P-* findings" means either *the importer agreed* or *the importer was never
+    asked*, and those are opposite facts. An empty set is the safe default: a
+    caller that forgets to populate it under-claims rather than over-claims.
+    """
+
     @property
     def retryable(self) -> bool:
         return self.verdict is Verdict.INCOMPLETE
@@ -108,36 +118,45 @@ def inspect(set_dir: str | Path, store: Store | None = None, *,
 
     findings = validate(set_dir, extra_tags=extra_tags)
     verdict = _classify(findings)
+    ran = {"manifest"}
     # The characteristics pre-check needs a trustworthy manifest to compare against,
     # so it only runs once the manifest itself is clean.
     if verdict is Verdict.READY:
         m = json.loads(mf.read_text(encoding="utf-8"))
         findings += precheck(set_dir / "characteristics.md", m)
+        ran.add("characteristics")
         if parser is not None:
-            findings += _preflight(set_dir, m, parser)
+            pf, reached = _preflight(set_dir, m, parser)
+            findings += pf
+            if reached:
+                ran.add("importer")
         verdict = _classify(findings)
-    return Inspection(set_dir, verdict, findings, name)
+    return Inspection(set_dir, verdict, findings, name, checked=frozenset(ran))
 
 
-def _preflight(set_dir: Path, manifest: dict, parser: Parser) -> list[Finding]:
+def _preflight(set_dir: Path, manifest: dict, parser: Parser) -> tuple[list[Finding], bool]:
     """Ask the Middleman what these archives would import as, and compare.
 
     A parser that is unreachable produces no findings rather than an INVALID
     verdict: the set may be perfectly good and the service merely down, and
     failing a delivery for that would be Maestro breaking its own gate.
+
+    The second return value is whether the importer actually answered, because
+    an empty finding list is produced by both agreement and unreachability, and
+    only the caller can say which of those it is reporting.
     """
     archives = [set_dir / (p.get("archive") or {}).get("filename", "")
                 for p in manifest.get("problems") or []]
     archives = [a for a in archives if a.is_file()]
     if not archives:
-        return []
+        return [], False
     try:
         parsed = parser(archives)
     except Exception as e:  # noqa: BLE001 — any transport failure, not just ours
         return [Finding("P-0", Severity.WARN,
                         f"could not pre-flight against the importer ({e}); the manifest "
-                        f"was validated locally only")]
-    return compare(manifest, parsed)
+                        f"was validated locally only")], False
+    return compare(manifest, parsed), True
 
 
 def candidates(watch_dir: str | Path) -> Iterator[Path]:
@@ -178,7 +197,8 @@ def ingest(set_dir: str | Path, store: Store, *, extra_tags: set[str] | None = N
     store.log(run_id, "info", f"ingested {len(seeds)} problem(s) from {Path(set_dir).name}")
     for f in result.findings:  # warnings survive ingest and belong in the record
         store.log(run_id, "warn", str(f), slug=f.slug)
-    return Inspection(Path(set_dir), Verdict.READY, result.findings, m["set"]["name"], run_id)
+    return Inspection(Path(set_dir), Verdict.READY, result.findings, m["set"]["name"], run_id,
+                      checked=result.checked)
 
 
 def scan(watch_dir: str | Path, store: Store, *, extra_tags: set[str] | None = None,
