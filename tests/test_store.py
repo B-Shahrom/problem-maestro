@@ -135,3 +135,44 @@ def test_state_survives_reopen(tmp_path):
 def test_unknown_problem_raises(store, run):
     with pytest.raises(KeyError):
         store.set_problem(run, "not-a-slug", status=ProblemStatus.OK)
+
+
+def test_the_store_survives_concurrent_writers(tmp_path):
+    """The scheduler writes from its loop thread and its ElectiCode worker.
+
+    Without a lock, two `BEGIN IMMEDIATE`s on one connection raise "cannot start a
+    transaction within a transaction" — and `bump_attempt` reads back a row it
+    just wrote, so an interleaving would also let one thread return the other's
+    count.
+    """
+    import threading
+
+    store = Store(tmp_path / "m.db")
+    try:
+        run_id = store.create_run("s", "/tmp/x",
+                                  [ProblemSeed(slug="a", idx=1, title="A", archive="a.zip")])
+        errors: list[Exception] = []
+        counts: list[int] = []
+        barrier = threading.Barrier(8)
+
+        def hammer(n):
+            try:
+                barrier.wait(5)
+                for i in range(25):
+                    store.log(run_id, "info", f"{n}:{i}")
+                    counts.append(store.bump_attempt(run_id, "a"))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=hammer, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+
+        assert not errors, errors
+        assert len(store.events(run_id, limit=1000)) == 200
+        assert store.problems(run_id)[0].attempts == 200
+        assert sorted(counts) == list(range(1, 201)), "a count was returned twice"
+    finally:
+        store.close()

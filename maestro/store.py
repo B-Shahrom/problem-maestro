@@ -12,6 +12,7 @@ access patterns are known.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -88,17 +89,36 @@ def _now() -> str:
 
 
 class Store:
+    """Durable run state.
+
+    **Shared across threads.** The scheduler runs the ElectiCode lane on a worker
+    thread so a `batch run` that takes tens of minutes cannot block the loop, and
+    both threads read and write here. SQLite's default refuses a connection used
+    off its creating thread, so this opts out of that check and takes the
+    responsibility instead: one lock serialises every transaction, and WAL lets
+    reads proceed against the last committed state while a write is open.
+
+    The lock is around the whole transaction rather than each statement, because
+    `set_problem` reads a row to decide what to write — two interleaved callers
+    would otherwise settle a race by overwriting each other's result.
+    """
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(self.path, isolation_level=None)
+        self._db = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
+        # A writer holds the lock, but a *reader* on another connection (a
+        # dashboard, `sqlite3` at a prompt) can still collide on the file.
+        self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
 
     def close(self) -> None:
-        self._db.close()
+        with self._lock:
+            self._db.close()
 
     def __enter__(self) -> "Store":
         return self
@@ -108,13 +128,24 @@ class Store:
 
     @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
-        self._db.execute("BEGIN IMMEDIATE")
-        try:
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                yield self._db
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+            self._db.execute("COMMIT")
+
+    @contextmanager
+    def _read(self) -> Iterator[sqlite3.Connection]:
+        """A read that cannot interleave with a transaction on this connection.
+
+        Reads go through the same connection as writes, so an unguarded one can
+        land between a `BEGIN IMMEDIATE` and its `COMMIT` and see uncommitted rows.
+        """
+        with self._lock:
             yield self._db
-        except Exception:
-            self._db.execute("ROLLBACK")
-            raise
-        self._db.execute("COMMIT")
 
     # ---------------------------------------------------------------- runs
 
@@ -147,7 +178,8 @@ class Store:
         return run_id
 
     def get_run(self, run_id: int) -> Run | None:
-        row = self._db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+        with self._read() as db:
+            row = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         if row is None:
             return None
         run = Run(
@@ -165,7 +197,8 @@ class Store:
         return run
 
     def list_runs(self) -> list[Run]:
-        ids = [r["id"] for r in self._db.execute("SELECT id FROM runs ORDER BY id DESC")]
+        with self._read() as db:
+            ids = [r["id"] for r in db.execute("SELECT id FROM runs ORDER BY id DESC")]
         return [r for r in (self.get_run(i) for i in ids) if r is not None]
 
     def set_run(
@@ -206,9 +239,10 @@ class Store:
     # ------------------------------------------------------------ problems
 
     def problems(self, run_id: int) -> list[Problem]:
-        rows = self._db.execute(
-            "SELECT * FROM problems WHERE run_id=? ORDER BY idx", (run_id,)
-        )
+        with self._read() as db:
+            rows = db.execute(
+                "SELECT * FROM problems WHERE run_id=? ORDER BY idx", (run_id,)
+            ).fetchall()
         return [self._problem(r) for r in rows]
 
     @staticmethod
@@ -275,15 +309,22 @@ class Store:
                 raise KeyError(f"no problem {slug!r} in run {run_id}")
 
     def bump_attempt(self, run_id: int, slug: str) -> int:
-        """Record another try at the current stage and return the new count."""
+        """Record another try at the current stage and return the new count.
+
+        The read-back is inside the same transaction as the increment. Split
+        across two, both of two concurrent callers can see the *final* value and
+        each believe it was theirs — so a retry budget of three grants four tries.
+        Today the scheduler never bumps one problem from two threads, but that is
+        an invariant of the caller, and this is where the count is defined.
+        """
         with self._tx() as db:
             db.execute(
                 "UPDATE problems SET attempts=attempts+1, updated_at=? WHERE run_id=? AND slug=?",
                 (_now(), run_id, slug),
             )
-        row = self._db.execute(
-            "SELECT attempts FROM problems WHERE run_id=? AND slug=?", (run_id, slug)
-        ).fetchone()
+            row = db.execute(
+                "SELECT attempts FROM problems WHERE run_id=? AND slug=?", (run_id, slug)
+            ).fetchone()
         if row is None:
             raise KeyError(f"no problem {slug!r} in run {run_id}")
         return int(row["attempts"])
@@ -340,10 +381,11 @@ class Store:
 
     def events(self, run_id: int, after_id: int = 0, limit: int = 500) -> list[sqlite3.Row]:
         """Cursor-based tail, so the dashboard can poll without re-reading."""
-        return list(self._db.execute(
-            "SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
-            (run_id, after_id, limit),
-        ))
+        with self._read() as db:
+            return db.execute(
+                "SELECT * FROM events WHERE run_id=? AND id>? ORDER BY id LIMIT ?",
+                (run_id, after_id, limit),
+            ).fetchall()
 
     # -------------------------------------------------------------- resume
 
