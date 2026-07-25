@@ -57,11 +57,10 @@ Design questions are settled. Everything below is build work.
    `TO_MAESTRO.md` in each dev's repo.
 3. Build order: ~~job store~~ → ~~ingest + validators~~ → ~~Polygon lane (incl. shaping)~~ →
    ~~upload~~ → ~~stage 6.5 reconcile~~ → ~~post-upload chores~~ → ~~audit gate~~ →
-   **scheduler** → dashboard.
+   ~~scheduler~~ → **dashboard**.
 
-Both lanes are built. What remains is the loop that drives them — one process stepping runs
-on a timer, with the Polygon half fanning out per problem and the ElectiCode half strictly
-serial — and the dashboard over the event log.
+The pipeline runs end to end. What remains is the dashboard over the event log, and a config
++ entry point so it can be started as a service rather than from Python.
 
 ## Code
 
@@ -77,8 +76,9 @@ serial — and the dashboard over the event log.
 | `maestro/polygon_lane.py` | Stages 3–5: one job per problem, quarantine on verify failure, extract into the upload parent |
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: exit codes carry the decision, nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
+| `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
 
-`python -m pytest` — 181 tests, no external services required.
+`python -m pytest` — 224 tests, no external services required.
 
 Two of the test modules talk to the other repos' real code when a checkout is present, and
 skip otherwise (`MAESTRO_SCRAPER_REPO`, `MAESTRO_MIDDLEMAN_REPO`). They exist because most of
