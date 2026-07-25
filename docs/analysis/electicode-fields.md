@@ -147,3 +147,11 @@ than an expected-failure path.
 
 Also visible: **2,000 problems** in the database, so any full-catalog scrape in stage 6.5 must
 paginate (40 pages × 50).
+
+Worth keeping the two figures apart: that 2,000 is the count the **problems page displays**,
+while the division page's embedded payload carried **1820** entries in the capture measured in
+`upload-modal-and-catalog.md`. They are different reads, possibly from different dates, and
+neither has been reconciled against the other. That matters for a catalog-backed scrape: if the
+payload is a subset rather than the whole table, stage 6.5 would read the difference as
+"these slugs didn't land". The Scraper dev checked their own capture and reported it complete,
+so this is a discrepancy to confirm on the first live run, not a known defect.

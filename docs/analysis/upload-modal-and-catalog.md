@@ -102,16 +102,33 @@ The rendered rows expose the **display name only**, no slug:
 </td>
 ```
 
+Measured against the capture (`1820` entries in the embedded payload):
+
+| | |
+|---|---|
+| catalog entries | **1820** |
+| distinct slugs | **1820** — every slug is unique |
+| titles shared by more than one problem | **23** |
+
+**Slug uniqueness is the load-bearing one.** Stage 6.5 joins Maestro's state to the platform
+by slug and refuses to continue if any uploaded slug is absent; that join is only sound if a
+slug identifies exactly one problem. It does. Titles do not — which is precisely why the join
+uses slugs and the *resolver* is the thing that has a problem.
+
 So division exact-match has to go slug → name (from the payload) → row. That works **except**
-where names collide, and they do: of ~2,000 titles, **28 are not unique** — `A + B` appears
-**three** times (`a-plus-b-in-binary`, `a-plus-b-subtask`, `count-a-plus-b-equal-to-c`), and 27
-more appear twice (`Ancestor Queries`, `Beautiful Numbers`, `Circle Handshakes`, `Distance
-Queries`, `Divisors`, `Equation`, …).
+where names collide, and they do: **23 titles are shared**, `A + B` by three problems
+(`a-plus-b-in-binary`, `a-plus-b-subtask`, `count-a-plus-b-equal-to-c`) and the rest by two
+(`Ancestor Queries`, `Beautiful Numbers`, `Circle Handshakes`, `Distance Queries`, `Divisors`, …).
 
 **The correct resolver:** map slug → name from the embedded payload; if that name is unique
 across the payload, match the row by exact name; **if not, refuse** — the DOM carries nothing
 that could disambiguate. That is the same fail-on-ambiguity rule already applied in the editor
-path, and it keeps ~56 problems from being silently mis-targeted.
+path, and it keeps roughly 47 problems from being silently mis-targeted.
 
 A cleaner fix, if the platform team is reachable: render the slug into the division row the way
-the problems list does. Then the payload lookup is unnecessary and all 2,000 resolve exactly.
+the problems list does. Then the payload lookup is unnecessary and every entry resolves exactly.
+
+> An earlier pass through this capture reported 28 collisions over "~2,000 titles". That count
+> came from the regex that was replaced after it backtracked catastrophically on the 1.2 MB
+> page; the figures above are from the corrected parse and supersede it. The `A + B`×3 case was
+> right in both.

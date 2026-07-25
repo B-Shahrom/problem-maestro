@@ -175,5 +175,7 @@ Worth being explicit, so nobody reads a green first run as more than it is:
   are queued, are tested but not exercised live.
 - **The quarantine path** only runs if a problem genuinely fails Polygon verification. If
   everything passes, that code is still unproven in production.
-- **The 28 colliding titles** on ElectiCode (`A + B` appears three times) are a resolver
-  hazard. Unless your set happens to collide, this run says nothing about it.
+- **The 23 colliding titles** on ElectiCode (`A + B` is shared by three problems) are a
+  resolver hazard. Unless your set happens to collide, this run says nothing about it. Slugs
+  themselves are unique across the catalog, which is why stage 6.5's join is sound — it is the
+  title-based *division* resolver that has to fail closed.
