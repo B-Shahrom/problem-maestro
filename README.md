@@ -55,12 +55,27 @@ Design questions are settled. Everything below is build work.
    `docs/analysis/seam-verdict.md`.
 2. Phase 2 in both apps — **in progress**. Task channel is `docs/maestro/FROM_MAESTRO.md` /
    `TO_MAESTRO.md` in each dev's repo.
-3. Build order: ~~job store~~ → ~~ingest + validators~~ → ~~Polygon lane (incl. shaping)~~ →
-   ~~upload~~ → ~~stage 6.5 reconcile~~ → ~~post-upload chores~~ → ~~audit gate~~ →
-   ~~scheduler~~ → **dashboard**.
+3. Build order: ~~job store~~ → ~~ingest + validators~~ → ~~Polygon lane~~ → ~~upload~~ →
+   ~~stage 6.5 reconcile~~ → ~~post-upload chores~~ → ~~audit gate~~ → ~~scheduler~~ →
+   ~~dashboard~~. **Done.**
 
-The pipeline runs end to end. What remains is the dashboard over the event log, and a config
-+ entry point so it can be started as a service rather than from Python.
+The build is complete: a set folder dropped in the watch directory goes through validation,
+Polygon import/build/download, ElectiCode upload, reconcile, chores and audit without
+intervention, and parks for a human at every point where it should.
+
+What remains is not code — it's the first supervised end-to-end run against live services.
+
+## Running it
+
+```
+python -m maestro init                 # write a starter config.json
+python -m maestro run                  # scheduler + dashboard on :8787
+python -m maestro status               # one-shot listing; non-zero if a run wants a human
+```
+
+`apply` is **off** by default, so a fresh install previews and parks each run at its first
+write. Approve individual runs in the dashboard, or set `apply: true` once you trust it.
+`config.json` is gitignored — it points at the session file and the Middleman.
 
 ## Code
 
@@ -77,8 +92,10 @@ The pipeline runs end to end. What remains is the dashboard over the event log, 
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: exit codes carry the decision, nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
 | `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
+| `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only two mutations in the system: approve a run's writes, resume a stopped one |
+| `maestro/__main__.py` | `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 224 tests, no external services required.
+`python -m pytest` — 253 tests, no external services required.
 
 Two of the test modules talk to the other repos' real code when a checkout is present, and
 skip otherwise (`MAESTRO_SCRAPER_REPO`, `MAESTRO_MIDDLEMAN_REPO`). They exist because most of
