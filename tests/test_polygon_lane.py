@@ -291,3 +291,44 @@ def test_a_manifest_without_limits_warns(lane, set_dir):
     warned = [e["message"] for e in store.events(run_id) if e["level"] == "warn"]
     assert any("no limits in the manifest" in w for w in warned)
     assert all(b"timeLimit" not in f for f in fake.fields)
+
+
+def test_an_applied_limit_that_disagrees_quarantines_the_problem(lane):
+    """Caught at import — before a build, download, upload and chore chain."""
+    store, run_id, build = lane
+    script = {s: [READY(s)] for s in SLUGS}
+    for s, bodies in script.items():
+        for b in bodies:
+            for e in b["problems"]:
+                if e["slug"] == SLUGS[0]:
+                    e["appliedTimeLimit"] = 5000     # the manifest says 1 s
+                    e["appliedMemoryLimit"] = 256
+                else:
+                    e["appliedTimeLimit"] = 1000
+                    e["appliedMemoryLimit"] = 256
+    ln, _ = build(script)
+    drive(ln, run_id)
+    by_slug = {p.slug: p for p in store.problems(run_id)}
+    assert by_slug[SLUGS[0]].status is ProblemStatus.QUARANTINED
+    assert "time limit" in by_slug[SLUGS[0]].error
+    assert by_slug[SLUGS[1]].status is ProblemStatus.OK
+
+
+def test_matching_applied_limits_pass(lane):
+    store, run_id, build = lane
+    script = {s: [READY(s)] for s in SLUGS}
+    for bodies in script.values():
+        for b in bodies:
+            for e in b["problems"]:
+                e["appliedTimeLimit"], e["appliedMemoryLimit"] = 1000, 256
+    ln, _ = build(script)
+    drive(ln, run_id)
+    assert all(p.status is ProblemStatus.OK for p in store.active(run_id))
+
+
+def test_an_older_middleman_without_the_field_is_not_a_finding(lane):
+    """Absent means "this build doesn't report it", not "it disagreed"."""
+    store, run_id, build = lane
+    ln, _ = build({s: [READY(s)] for s in SLUGS})
+    drive(ln, run_id)
+    assert all(p.status is ProblemStatus.OK for p in store.active(run_id))

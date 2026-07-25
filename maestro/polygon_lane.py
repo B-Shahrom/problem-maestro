@@ -137,6 +137,14 @@ class PolygonLane:
         # would resubmit work that was already done.
         entry = self._entry(body, p.slug)
         self._record_ids(run_id, p.slug, entry)
+        if reason := self._limits_applied(run_id, p, entry):
+            # Caught here rather than at stage 8. Both are real checks — this one
+            # reads what the Middleman sent, the audit reads what the platform
+            # ended up with — but failing at import saves a build, a download, an
+            # upload and a chore chain that would all have to be redone anyway.
+            self.store.quarantine(run_id, p.slug, reason)
+            report.quarantined.append(p.slug)
+            return Action.HALT
 
         if d.action is Action.SUCCESS:      # VERIFY_READY, or IMPORTED_ALREADY_VERIFIED
             self.store.set_problem(run_id, p.slug, stage=ProblemStage.BUILT,
@@ -148,6 +156,31 @@ class PolygonLane:
                                    status=ProblemStatus.RUNNING)
             report.advanced.append(p.slug)
         return d.action
+
+    def _limits_applied(self, run_id: int, p, entry: dict) -> str | None:
+        """Did `problem.updateInfo` get the limits Maestro sent?
+
+        `appliedTimeLimit`/`appliedMemoryLimit` are what the Middleman actually
+        passed, recorded only when that call returned OK — so they confirm the
+        send took rather than re-reading Polygon. `null` on a tests-only pack,
+        which never calls `updateInfo` at all, and absent on an older Middleman;
+        neither is a finding.
+        """
+        run = self.store.get_run(run_id)
+        if run is None:
+            return None
+        want = self._limits(run_id, Path(run.set_dir), p.slug)
+        for label, sent, key, scale in (
+            ("time limit", want.get("time_limit_s"), "appliedTimeLimit", 1000),
+            ("memory limit", want.get("memory_limit_mb"), "appliedMemoryLimit", 1),
+        ):
+            got = entry.get(key)
+            if sent is None or got is None:
+                continue
+            if int(round(float(sent) * scale)) != int(got):
+                return (f"{label}: Maestro sent {int(round(float(sent) * scale))} but the "
+                        f"import applied {int(got)} — the package would carry the wrong one")
+        return None
 
     def _limits(self, run_id: int, set_dir: Path, slug: str) -> dict:
         """This problem's authored limits, from the manifest.

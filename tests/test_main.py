@@ -3,7 +3,7 @@ import json
 import pytest
 
 from maestro.__main__ import DEFAULTS, build, load_config, main
-from maestro.model import BlockReason, ProblemSeed, RunStatus
+from maestro.model import BlockReason, ProblemSeed
 from maestro.store import Store
 
 from tests.conftest import SLUGS
