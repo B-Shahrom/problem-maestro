@@ -3,7 +3,8 @@ import json
 import pytest
 
 from maestro.polygon import (
-    STEP_FAILED_RETRY_CAP, Action, PolygonClient, PolygonError, decide, problem_decisions,
+    RETRY_CAP, STEP_FAILED_RETRY_CAP, Action, PolygonClient, PolygonError, decide,
+    problem_decisions,
 )
 
 
@@ -138,3 +139,36 @@ def test_download_passes_problem_id_for_multi_problem_jobs():
     t = fake([(200, {"ok": True})])
     PolygonClient(transport=t).download_package("j1", problem_id=563710)
     assert "problemId=563710" in t.calls[0][1]
+
+
+def test_interrupted_retries_and_is_capped_like_any_other():
+    """A job caught mid-import by a Middleman restart comes back as retryable.
+
+    It reaches Maestro through the generic clientAction mapping rather than a
+    case of its own — but it must still be capped: each retry re-runs a
+    multi-minute import, and a batch that is itself crashing the service would
+    otherwise loop forever.
+    """
+    early = decide(client_action="retry", error_code="INTERRUPTED", attempts=1)
+    assert early.action is Action.RETRY
+    late = decide(client_action="retry", error_code="INTERRUPTED", attempts=RETRY_CAP)
+    assert late.action is Action.HALT
+    assert "INTERRUPTED" in late.reason and "restarting" in late.reason
+
+
+def test_an_unnamed_retry_code_is_capped_too():
+    late = decide(client_action="retry", error_code="SOMETHING_NEW", attempts=RETRY_CAP)
+    assert late.action is Action.HALT
+
+
+def test_a_non_retry_action_ignores_the_cap():
+    """`wait` is not an attempt at anything — polling must not exhaust a budget."""
+    d = decide(client_action="wait", error_code="VERIFY_UNKNOWN", attempts=99)
+    assert d.action is Action.WAIT
+
+
+def test_importing_with_reset_is_refused():
+    """`reset` discards the working copy — never right on a retry path."""
+    client = PolygonClient("http://x", transport=lambda *a: (202, b"{}"))
+    with pytest.raises(ValueError, match="data loss"):
+        client.import_problem(["a.zip"], on_exists="reset")

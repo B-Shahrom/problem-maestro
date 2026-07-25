@@ -21,10 +21,17 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-#: `STEP_FAILED` covers both a transient Polygon HTML-instead-of-JSON response and a
-#: genuine content error (a non-compiling `solution.cpp`). The taxonomy says retry but
-#: cap it, because the second kind never recovers.
-STEP_FAILED_RETRY_CAP = 3
+#: Every `retry` is capped, whatever its error code.
+#:
+#: `STEP_FAILED` is the case that forced this: it covers both a transient Polygon
+#: HTML-instead-of-JSON response and a genuine content error (a non-compiling
+#: `solution.cpp`) indistinguishably, and the second kind never recovers.
+#: `INTERRUPTED` — a job that was mid-import when the Middleman restarted — has the
+#: same shape for a different reason: it recovers if the restart was incidental, and
+#: never if this batch is what brings the service down. A retry here re-runs a
+#: multi-minute import, so an uncapped loop is expensive as well as futile.
+RETRY_CAP = 3
+STEP_FAILED_RETRY_CAP = RETRY_CAP  # kept: the name says why the cap exists at all
 
 
 class Action(StrEnum):
@@ -75,9 +82,10 @@ def decide(
     a batch because the *orchestrated service* restarted would be a self-inflicted
     outage.
 
-    **`STEP_FAILED` retries are capped.** The code covers a transient and a
-    content error indistinguishably; retrying a non-compiling solution forever is
-    the failure mode a cap prevents.
+    **`retry` is capped.** The taxonomy says retry without saying how often, and
+    two of its codes (`STEP_FAILED`, `INTERRUPTED`) describe conditions that may
+    never clear. Retrying a non-compiling solution forever is the failure mode a
+    cap prevents.
     """
     if http_status == 404 and "unknown jobid" in detail.lower():
         return Decision(Action.RESUBMIT, "middleman restarted and lost the job; import is idempotent")
@@ -87,11 +95,12 @@ def decide(
     if http_status is not None and http_status >= 400:
         return Decision(Action.HALT, detail or f"HTTP {http_status}")
 
-    if error_code == "STEP_FAILED" and attempts >= STEP_FAILED_RETRY_CAP:
-        return Decision(
-            Action.HALT,
-            f"STEP_FAILED after {attempts} attempts — treating as a content error, not a transient",
-        )
+    if client_action == "retry" and attempts >= RETRY_CAP:
+        why = {
+            "STEP_FAILED": "treating as a content error, not a transient",
+            "INTERRUPTED": "the Middleman keeps restarting mid-import",
+        }.get(error_code or "", "the condition is not clearing")
+        return Decision(Action.HALT, f"{error_code or 'retry'} after {attempts} attempts — {why}")
 
     if client_action is None:
         return Decision(Action.WAIT, "no action reported yet")
@@ -164,13 +173,25 @@ class PolygonClient:
     def import_problem(self, archives: list[str | Path], *, on_exists: str = "fill") -> dict[str, Any]:
         """Submit archives as multipart. Returns the 202 job snapshot.
 
-        `on_exists="fill"` is the endpoint's own default and the behaviour Maestro
-        relies on for retries: a re-submitted slug reuses the same Polygon problem
-        instead of creating a duplicate.
+        `on_exists="fill"` is the endpoint's own default and the behaviour every
+        retry in Maestro depends on: the existing problem is resolved by name and
+        updated **in place**, keeping its Polygon id, and tests are keyed by
+        description so a re-run replaces matching ones and appends new ones.
+
+        The only other accepted value, `reset`, **discards the working copy
+        first**. That is destructive and never right for a retry path, so it is
+        rejected here rather than left to the server's clamp — a resubmit that
+        silently reset a problem would destroy work no other stage can recover.
 
         Passing a main archive and its `<slug>-tests` pack together is correct —
         the endpoint merges same-slug archives into one problem.
         """
+        if on_exists != "fill":
+            raise ValueError(
+                f"onExists={on_exists!r}: Maestro only ever imports with 'fill'. "
+                "'reset' discards the existing working copy, which would turn a "
+                "retry into data loss."
+            )
         paths = [Path(a) for a in archives]
         body, content_type = _multipart(paths, {"onExists": on_exists})
         status, raw = self._send("POST", f"{self.base}/api/import-problem", body,
