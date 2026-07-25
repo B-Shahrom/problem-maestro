@@ -27,16 +27,23 @@ forever, or one that rejects a set because it looked while a copy was in flight.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from .characteristics import precheck
 from .checks import Finding, Severity, errors
 from .manifest import validate
 from .model import ProblemSeed
+from .preflight import compare
 from .store import Store
+
+#: `PolygonClient.parse` — archives in, a `/api/parse` response out. Taken as a
+#: callable rather than a client so ingest depends on the *question*, not on a
+#: configured HTTP client it would otherwise have to be handed everywhere.
+Parser = Callable[[list[Path]], dict[str, Any]]
 
 #: Findings that mean "the folder is still filling up" rather than "this set is wrong".
 _INCOMPLETE_MARKERS = ("is missing from the set folder", "is missing", "bytes on disk")
@@ -73,8 +80,15 @@ def _classify(findings: list[Finding]) -> Verdict:
     return Verdict.INVALID
 
 
-def inspect(set_dir: str | Path, store: Store | None = None, *, extra_tags: set[str] | None = None) -> Inspection:
-    """Validate one candidate set folder without touching it."""
+def inspect(set_dir: str | Path, store: Store | None = None, *,
+            extra_tags: set[str] | None = None, parser: Parser | None = None) -> Inspection:
+    """Validate one candidate set folder without touching it.
+
+    `parser` is the Middleman's `/api/parse` dry run. When given, the manifest is
+    also checked against what will *actually* import — see `preflight`. It is
+    optional so that ingest keeps working with the Middleman down: a set that
+    cannot be pre-flighted is still validated locally, it just loses one gate.
+    """
     set_dir = Path(set_dir)
     mf = set_dir / "MANIFEST.json"
     if not mf.is_file():
@@ -97,9 +111,33 @@ def inspect(set_dir: str | Path, store: Store | None = None, *, extra_tags: set[
     # The characteristics pre-check needs a trustworthy manifest to compare against,
     # so it only runs once the manifest itself is clean.
     if verdict is Verdict.READY:
-        findings += precheck(set_dir / "characteristics.md", json.loads(mf.read_text(encoding="utf-8")))
+        m = json.loads(mf.read_text(encoding="utf-8"))
+        findings += precheck(set_dir / "characteristics.md", m)
+        if parser is not None:
+            findings += _preflight(set_dir, m, parser)
         verdict = _classify(findings)
     return Inspection(set_dir, verdict, findings, name)
+
+
+def _preflight(set_dir: Path, manifest: dict, parser: Parser) -> list[Finding]:
+    """Ask the Middleman what these archives would import as, and compare.
+
+    A parser that is unreachable produces no findings rather than an INVALID
+    verdict: the set may be perfectly good and the service merely down, and
+    failing a delivery for that would be Maestro breaking its own gate.
+    """
+    archives = [set_dir / (p.get("archive") or {}).get("filename", "")
+                for p in manifest.get("problems") or []]
+    archives = [a for a in archives if a.is_file()]
+    if not archives:
+        return []
+    try:
+        parsed = parser(archives)
+    except Exception as e:  # noqa: BLE001 — any transport failure, not just ours
+        return [Finding("P-0", Severity.WARN,
+                        f"could not pre-flight against the importer ({e}); the manifest "
+                        f"was validated locally only")]
+    return compare(manifest, parsed)
 
 
 def candidates(watch_dir: str | Path) -> Iterator[Path]:
@@ -110,14 +148,15 @@ def candidates(watch_dir: str | Path) -> Iterator[Path]:
     yield from sorted(p for p in watch_dir.iterdir() if p.is_dir())
 
 
-def ingest(set_dir: str | Path, store: Store, *, extra_tags: set[str] | None = None) -> Inspection:
+def ingest(set_dir: str | Path, store: Store, *, extra_tags: set[str] | None = None,
+           parser: Parser | None = None) -> Inspection:
     """Validate and, if clean, register a run.
 
     Nothing is moved or modified. The set folder stays exactly as delivered — it is
     the input to the Polygon lane, and a corrected re-delivery arrives as a new
     folder with an `-rN` suffix rather than an edit to this one.
     """
-    result = inspect(set_dir, store, extra_tags=extra_tags)
+    result = inspect(set_dir, store, extra_tags=extra_tags, parser=parser)
     if result.verdict is not Verdict.READY:
         return result
 
@@ -138,6 +177,8 @@ def ingest(set_dir: str | Path, store: Store, *, extra_tags: set[str] | None = N
     return Inspection(Path(set_dir), Verdict.READY, result.findings, m["set"]["name"], run_id)
 
 
-def scan(watch_dir: str | Path, store: Store, *, extra_tags: set[str] | None = None) -> list[Inspection]:
+def scan(watch_dir: str | Path, store: Store, *, extra_tags: set[str] | None = None,
+         parser: Parser | None = None) -> list[Inspection]:
     """One sweep of the watched folder. Safe to call on a timer."""
-    return [ingest(d, store, extra_tags=extra_tags) for d in candidates(watch_dir)]
+    return [ingest(d, store, extra_tags=extra_tags, parser=parser)
+            for d in candidates(watch_dir)]

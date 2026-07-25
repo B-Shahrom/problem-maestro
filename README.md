@@ -72,15 +72,24 @@ serial — and the dashboard over the event log.
 | `maestro/manifest.py` | `MANIFEST.json` cross-checks M-1…M-14, including opening every archive |
 | `maestro/characteristics.py` | Parses exactly as `batch.py` does, then checks the six things it cannot report |
 | `maestro/ingest.py` | Stage 1→2: sentinel detection, and telling "still copying" from "invalid" |
+| `maestro/preflight.py` | P-1…P-6: the manifest against what the Middleman's own parser says will import — optional, so ingest still works with the service down |
 | `maestro/polygon.py` | Middleman client plus the decision policy layered over its error taxonomy |
 | `maestro/polygon_lane.py` | Stages 3–5: one job per problem, quarantine on verify failure, extract into the upload parent |
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: exit codes carry the decision, nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
 
-`python -m pytest` — 148 tests, no external services required. One of them
-(`test_characteristics_roundtrip.py`) checks Maestro's rendered characteristics against the
-real `batch.py` parser when a Scraper checkout is present, and skips otherwise; it is the
-only place the mirror parser can be caught drifting from the thing it mirrors.
+`python -m pytest` — 181 tests, no external services required.
+
+Two of the test modules talk to the other repos' real code when a checkout is present, and
+skip otherwise (`MAESTRO_SCRAPER_REPO`, `MAESTRO_MIDDLEMAN_REPO`). They exist because most of
+Maestro's risk is not in its own logic but in its *model* of the other two systems, and a
+test that only checks Maestro against itself cannot see that model drifting:
+
+- `test_characteristics_roundtrip.py` — the characteristics Maestro renders, parsed back by
+  the real `batch.py`, down to the positional tag alignment and the flag that protects
+  existing tags
+- `test_preflight_roundtrip.py` — the manifest cross-check against the real `zip_parser`,
+  including that each field it reads means what it is assumed to mean
 
 Secrets (Polygon key/secret, ElectiCode session cookies, Anthropic API key) stay local and
 gitignored. Nothing here is exposed publicly — remote access is over a mesh VPN.

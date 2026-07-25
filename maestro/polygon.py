@@ -204,6 +204,25 @@ class PolygonClient:
             raise PolygonError(status, (parsed or {}).get("detail", "import rejected"))
         return parsed
 
+    def parse(self, archives: list[str | Path]) -> dict[str, Any]:
+        """Dry run: what would these archives import as? No Polygon calls.
+
+        The same parser the import uses, so its answer is authoritative where
+        Maestro's own reading of an archive is only a second opinion.
+        """
+        body, content_type = _multipart([Path(a) for a in archives], {})
+        status, raw = self._send("POST", f"{self.base}/api/parse", body,
+                                 {"Content-Type": content_type})
+        try:
+            parsed = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            parsed = None
+        if status != 200 or parsed is None:
+            detail = (parsed or {}).get("detail") if isinstance(parsed, dict) else \
+                raw[:200].decode("utf-8", "replace")
+            raise PolygonError(status, detail or "parse failed")
+        return parsed
+
     def verify_status(self, job_id: str) -> tuple[int, dict[str, Any]]:
         """Poll a job. Returns `(http_status, body)` — 404 is expected after a restart."""
         return self._call("GET", f"/api/verify-status/{job_id}")
