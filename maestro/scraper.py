@@ -73,6 +73,28 @@ def interpret(rc: int, *, session: bool = False) -> tuple[Outcome, str]:
     return table.get(rc, (Outcome.HALT, f"unexpected exit code {rc}"))
 
 
+#: argparse's own rejections. It exits `2`, the same code the Scraper uses for an
+#: operational failure, so the text is the only thing that tells them apart.
+_USAGE_MARKERS = ("invalid choice:", "unrecognized arguments:", "error: argument",
+                  "the following arguments are required")
+
+
+def _usage_error(stderr: str) -> str | None:
+    """The argparse complaint in `stderr`, if that is what this was.
+
+    Nearly always means the Scraper checkout predates a capability Maestro was
+    built against, so the message says so — the alternative is an operator
+    reading "operational failure" about a tool that is working exactly as its
+    version intends.
+    """
+    for line in reversed((stderr or "").splitlines()):
+        if any(m in line for m in _USAGE_MARKERS):
+            return (f"the Scraper rejected the command line — {line.strip()}. "
+                    "This checkout is probably older than the contract Maestro "
+                    "was built against; update it and re-run `maestro check`")
+    return None
+
+
 @dataclass(slots=True)
 class Result:
     argv: list[str]
@@ -157,6 +179,12 @@ class ScraperClient:
         argv = [self.python, str(self.repo / tool), "--state", str(self.state), sub, *args]
         rc, out, err = self._run_argv(argv, timeout or self.timeout)
         outcome, reason = interpret(rc, session=session)
+        if outcome is Outcome.RETRY and (usage := _usage_error(err)):
+            # argparse also exits 2, which collides with the Scraper's own
+            # "operational failure". Retrying an unknown subcommand or flag is
+            # pure waste, and worse, it buries the real cause under three
+            # identical failures before reporting a timeout-shaped error.
+            outcome, reason = Outcome.HALT, usage
         return Result(argv=argv, rc=rc, stdout=out, stderr=err, outcome=outcome, reason=reason)
 
     @staticmethod

@@ -9,13 +9,33 @@ from maestro.store import Store
 from tests.conftest import SLUGS
 
 
+def _scraper(tmp_path, name="scraper", *, capable=True):
+    """A stub checkout. `capable=False` mimics one predating Phase 2.
+
+    The declarations are written the way the real tools write them — the
+    `add_parser(` call split across lines — because that shape is exactly what a
+    naive substring check gets wrong, and a stub that avoided it would let the
+    check pass here while failing against the real repo.
+    """
+    tools = {
+        "contest_scraper.py": ['sub.add_parser(\n        "session", help="…")'],
+        "problem_uploader.py": ['sub.add_parser("upload")', 'pu.add_argument("--only")',
+                                'pu.add_argument("--json", action="store_true")'],
+        "problem_scraper.py": ['sub.add_parser("problems")'],
+        "batch.py": ['sub.add_parser("run")', 'pr.add_argument("--tags-mode")',
+                     'pr.add_argument("--skip")', 'pr.add_argument("--json")'],
+        "report.py": ['sub.add_parser(\n        "audit")', 'pa.add_argument("--char")'],
+    }
+    repo = tmp_path / name
+    repo.mkdir(parents=True, exist_ok=True)
+    for tool, decls in tools.items():
+        repo.joinpath(tool).write_text("\n".join(decls) if capable else "", encoding="utf-8")
+    return repo
+
+
 @pytest.fixture
 def cfg(tmp_path):
-    from maestro.__main__ import REQUIRED_TOOLS
-    repo = tmp_path / "scraper"
-    repo.mkdir()
-    for tool in REQUIRED_TOOLS:
-        (repo / tool).write_text("", encoding="utf-8")
+    repo = _scraper(tmp_path)
     state = tmp_path / "session_state.json"
     state.write_text("{}", encoding="utf-8")
 
@@ -103,13 +123,6 @@ def test_status_on_an_empty_store_is_clean(cfg, capsys):
 # --------------------------------------------------------------- path checks
 
 
-def _scraper(tmp_path, name="scraper"):
-    from maestro.__main__ import REQUIRED_TOOLS
-    repo = tmp_path / name
-    repo.mkdir(parents=True, exist_ok=True)
-    for tool in REQUIRED_TOOLS:
-        (repo / tool).write_text("", encoding="utf-8")
-    return repo
 
 
 def _cfg(tmp_path, **over):
@@ -181,3 +194,44 @@ def test_check_exits_non_zero_on_a_bad_path(tmp_path, capsys):
     path.write_text(json.dumps(_cfg(tmp_path, scraper_repo=str(tmp_path / "nope"))),
                     encoding="utf-8")
     assert main(["--config", str(path), "check"]) == 1
+
+
+# ------------------------------------------------------- outdated checkouts
+
+
+def test_a_checkout_predating_phase_2_is_named(tmp_path):
+    """The real failure: `session` landed in priority 4, and an older checkout
+    rejects it mid-run with argparse's own error rather than at startup."""
+    from maestro.__main__ import check_capabilities
+    problems = check_capabilities(_cfg(tmp_path, scraper_repo=str(
+        _scraper(tmp_path, "old", capable=False))))
+    joined = "\n".join(problems)
+    assert "`session` subcommand" in joined and "priority 4" in joined
+    assert "older than the contract" in joined
+    assert any("git -C" in p and "pull" in p for p in problems)
+
+
+def test_a_current_checkout_has_no_capability_problems(tmp_path):
+    from maestro.__main__ import check_capabilities
+    assert check_capabilities(_cfg(tmp_path)) == []
+
+
+def test_check_fails_on_an_outdated_checkout(tmp_path, capsys):
+    path = tmp_path / "c.json"
+    path.write_text(json.dumps(_cfg(tmp_path, scraper_repo=str(
+        _scraper(tmp_path, "old", capable=False)))), encoding="utf-8")
+    assert main(["--config", str(path), "check"]) == 1
+    assert "older than the contract" in capsys.readouterr().err
+
+
+def test_a_missing_tool_is_not_also_a_capability_complaint(tmp_path):
+    """One cause, one message — check_paths already reports the missing file."""
+    from maestro.__main__ import check_capabilities
+    assert check_capabilities(_cfg(tmp_path, scraper_repo=str(tmp_path / "nowhere"))) == []
+
+
+def test_run_refuses_to_start_against_an_outdated_checkout(tmp_path):
+    """`run` goes through build(), so the check has to be there and not only in `check`."""
+    from maestro.__main__ import build
+    with pytest.raises(SystemExit, match="older than the contract"):
+        build(_cfg(tmp_path, scraper_repo=str(_scraper(tmp_path, "old", capable=False))))

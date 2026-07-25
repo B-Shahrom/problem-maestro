@@ -1,3 +1,5 @@
+import pytest
+
 from pathlib import Path
 
 from maestro.scraper import (Detected, Outcome, ScraperClient, _default_runner,
@@ -130,3 +132,45 @@ def test_detected_is_empty_without_either_source():
 def test_events_drop_unparseable_lines_rather_than_raising():
     stream = '{"event":"start","total":1}\nnot json\n{"event":"item","id":"a"}\n'
     assert [e.get("event") for e in events(stream)] == ["start", "item"]
+
+
+# ------------------------------------------------------- outdated checkouts
+
+
+USAGE_ERROR = (
+    "usage: contest_scraper.py [-h] [--state STATE] {login,electicode,contest,list,scrape,dump} ...\n"
+    "contest_scraper.py: error: argument command: invalid choice: 'session' "
+    "(choose from 'login', 'electicode', 'contest', 'list', 'scrape', 'dump')\n"
+)
+
+
+def test_an_argparse_rejection_halts_instead_of_retrying(tmp_path):
+    """argparse also exits 2 — retrying an unknown subcommand is pure waste."""
+    def run(argv, timeout):
+        return 2, "", USAGE_ERROR
+
+    r = ScraperClient(tmp_path, tmp_path / "s.json", runner=run).session()
+    assert r.outcome is Outcome.HALT
+    assert "invalid choice: 'session'" in r.reason
+    assert "older than the contract" in r.reason
+
+
+def test_a_genuine_operational_failure_still_retries(tmp_path):
+    def run(argv, timeout):
+        return 2, "", "Timed out waiting for the platform to detect problems.\n"
+
+    r = ScraperClient(tmp_path, tmp_path / "s.json", runner=run).scrape(tmp_path / "c.json")
+    assert r.outcome is Outcome.RETRY
+
+
+@pytest.mark.parametrize("line", [
+    "tool.py: error: unrecognized arguments: --json",
+    "tool.py: error: argument --skip: expected one argument",
+    "tool.py: error: the following arguments are required: --char",
+])
+def test_every_argparse_shape_is_recognised(tmp_path, line):
+    def run(argv, timeout):
+        return 2, "", f"usage: tool.py …\n{line}\n"
+
+    assert ScraperClient(tmp_path, tmp_path / "s.json",
+                         runner=run).scrape(tmp_path / "c.json").outcome is Outcome.HALT

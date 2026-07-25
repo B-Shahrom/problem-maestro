@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import signal
 import sys
 from pathlib import Path
@@ -106,8 +107,52 @@ def check_paths(cfg: dict) -> list[str]:
     return problems
 
 
+#: What Maestro invokes, and the Phase 2 item that added it. Checked because a
+#: checkout that predates one of these fails *mid-run* with argparse's own error,
+#: minutes in and several stages from anything the operator configured.
+#:
+#: Read statically from the source rather than by running `--help`: that costs no
+#: subprocess, and it still answers correctly on a machine where the Scraper's own
+#: dependencies are missing — which is a different problem deserving its own
+#: message.
+#: `(what, phase, pattern)` per tool. The patterns tolerate the line breaks
+#: argparse calls are routinely written with — `sub.add_parser(\n    "session",`
+#: is the real shape in `contest_scraper.py`, and matching a bare
+#: `add_parser("session"` misses it and reports a working checkout as broken.
+REQUIRED_CAPABILITIES: dict[str, list[tuple[str, str, str]]] = {
+    "contest_scraper.py": [("the `session` subcommand", "priority 4", r'add_parser\(\s*"session"')],
+    "problem_uploader.py": [("the `upload` subcommand", "Phase 1", r'add_parser\(\s*"upload"'),
+                            ("`upload --only`", "priority 8", r'"--only"'),
+                            ("`upload --json`", "priority 6", r'"--json"')],
+    "problem_scraper.py": [("the `problems` subcommand", "Phase 1", r'add_parser\(\s*"problems"')],
+    "batch.py": [("the `run` subcommand", "Phase 1", r'add_parser\(\s*"run"'),
+                 ("`run --tags-mode`", "Phase 1", r'"--tags-mode"'),
+                 ("`run --skip`", "priority 8", r'"--skip"'),
+                 ("`run --json`", "priority 6", r'"--json"')],
+    "report.py": [("the `audit` subcommand", "Phase 1", r'add_parser\(\s*"audit"'),
+                  ("`audit --char`", "priority 5", r'"--char"')],
+}
+
+
+def check_capabilities(cfg: dict) -> list[str]:
+    """Whether the configured Scraper checkout can do what Maestro asks of it."""
+    repo = Path(cfg["scraper_repo"] or "")
+    out: list[str] = []
+    for tool, needs in REQUIRED_CAPABILITIES.items():
+        try:
+            source = (repo / tool).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue  # a missing tool is check_paths' finding, not this one
+        for what, added in ((w, a) for w, a, p in needs if not re.search(p, source)):
+            out.append(f"{tool} does not support {what} (added by Phase 2 {added}) — "
+                       f"this checkout is older than the contract Maestro was built against")
+    if out:
+        out.append(f"update it:  git -C \"{repo}\" pull")
+    return out
+
+
 def build(cfg: dict, *, check: bool = True) -> tuple[Scheduler, Store]:
-    if check and (problems := check_paths(cfg)):
+    if check and (problems := check_paths(cfg) + check_capabilities(cfg)):
         raise SystemExit("config problems:\n  - " + "\n  - ".join(problems))
     store = Store(cfg["db"])
     middleman = PolygonClient(cfg["middleman_url"])
@@ -235,7 +280,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     """Validate the config without starting anything. Run this first."""
     cfg = load_config(args.config)
-    if problems := check_paths(cfg):
+    if problems := check_paths(cfg) + check_capabilities(cfg):
         for p in problems:
             print(f"  - {p}", file=sys.stderr)
         return 1
