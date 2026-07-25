@@ -1,0 +1,279 @@
+"""A read-mostly view of the run store, over stdlib HTTP.
+
+The pipeline is mostly unattended, so this exists for the moments when it is not:
+a run parked on an expired session, a batch stopped mid-chore chain, an audit
+that found a gap. Those states were designed to wait for a human, and until now
+the only way to see or clear one was `sqlite3` at a prompt.
+
+Two mutations, and only two — `approve` and `resume`. Both are decisions the
+state machine deliberately refuses to make for itself:
+
+* **approve** opens the apply gate for one run. Per-run because a scheduler-wide
+  `apply` cannot be granted to a single batch.
+* **resume** clears FAILED or BLOCKED back to RUNNING. Nothing else in the system
+  does this, on purpose: a run stops so that a person looks at it, and code that
+  un-stopped runs on a timer would make every stop meaningless.
+
+Neither retries anything by itself. Clearing the status only makes the run
+eligible for the next tick, and the lane's own idempotency rules still decide
+what actually happens — approving a run does not bypass them.
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import asdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+from .model import RunStatus
+from .store import Store
+
+#: Browsers send a cross-origin form POST without a preflight, so a page on
+#: another site could otherwise drive this server through the operator's browser.
+#: A custom header cannot be set cross-origin without CORS approval, which this
+#: never gives — so requiring one is a complete defence against that, at the cost
+#: of one line in the fetch call.
+GUARD_HEADER = "X-Maestro"
+
+
+class _Handler(BaseHTTPRequestHandler):
+    server_version = "Maestro"
+    store: Store           # set on the server, read through `self.server`
+    scheduler = None
+
+    # ------------------------------------------------------------- plumbing
+
+    def log_message(self, fmt: str, *args) -> None:
+        """Silence the default stderr access log — the run log is the interesting one."""
+
+    def _send(self, code: int, payload: object, content_type: str = "application/json") -> None:
+        body = (payload if isinstance(payload, bytes)
+                else json.dumps(payload, default=str).encode("utf-8"))
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        # Nothing here should be cached: the whole point is the current state.
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    @property
+    def _store(self) -> Store:
+        return self.server.store  # type: ignore[attr-defined]
+
+    # -------------------------------------------------------------- routing
+
+    def do_GET(self) -> None:  # noqa: N802
+        url = urlparse(self.path)
+        parts = [p for p in url.path.split("/") if p]
+        try:
+            if not parts:
+                return self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            if parts == ["api", "runs"]:
+                return self._send(200, {"runs": [self._summary(r)
+                                                 for r in self._store.list_runs()]})
+            if len(parts) == 3 and parts[:2] == ["api", "runs"]:
+                return self._run_detail(parts[2])
+            if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "events":
+                return self._events(parts[2], url.query)
+        except ValueError:
+            return self._send(400, {"error": "bad run id"})
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.headers.get(GUARD_HEADER) is None:
+            # See GUARD_HEADER. This is the CSRF check, not authentication —
+            # binding to localhost is what keeps strangers out.
+            return self._send(403, {"error": f"missing {GUARD_HEADER} header"})
+        parts = [p for p in urlparse(self.path).path.split("/") if p]
+        if len(parts) != 4 or parts[:2] != ["api", "runs"]:
+            return self._send(404, {"error": "not found"})
+        try:
+            run_id = int(parts[2])
+        except ValueError:
+            return self._send(400, {"error": "bad run id"})
+        action = parts[3]
+        if action not in ("approve", "resume"):
+            return self._send(404, {"error": f"unknown action {action!r}"})
+
+        run = self._store.get_run(run_id)
+        if run is None:
+            return self._send(404, {"error": f"no run {run_id}"})
+        getattr(self, f"_{action}")(run)
+        self._send(200, {"run": self._summary(self._store.get_run(run_id))})
+
+    # -------------------------------------------------------------- actions
+
+    def _approve(self, run) -> None:
+        self._store.approve(run.id)
+        self._store.log(run.id, "info", "approved by the operator — writes to ElectiCode enabled")
+        if run.status is RunStatus.BLOCKED:
+            # An approval that left the run blocked would need a second click to
+            # do anything, and the operator has already said what they want.
+            self._resume(run)
+
+    def _resume(self, run) -> None:
+        if run.status not in (RunStatus.FAILED, RunStatus.BLOCKED):
+            return
+        self._store.set_run(run.id, status=RunStatus.RUNNING)
+        self._store.log(run.id, "info", f"resumed by the operator from {run.status}")
+
+    # --------------------------------------------------------------- reads
+
+    def _run_detail(self, raw: str) -> None:
+        run = self._store.get_run(int(raw))
+        if run is None:
+            return self._send(404, {"error": f"no run {raw}"})
+        detail = self._summary(run)
+        detail["problems"] = [asdict(p) for p in run.problems]
+        detail["set_dir"] = run.set_dir
+        return self._send(200, {"run": detail})
+
+    def _events(self, raw: str, query: str) -> None:
+        after = int((parse_qs(query).get("after") or ["0"])[0] or 0)
+        rows = self._store.events(int(raw), after_id=after)
+        return self._send(200, {"events": [dict(r) for r in rows],
+                                "cursor": rows[-1]["id"] if rows else after})
+
+    @staticmethod
+    def _summary(run) -> dict:
+        """One row's worth. Problem counts rather than the problems themselves."""
+        by_status: dict[str, int] = {}
+        for p in run.problems:
+            by_status[str(p.status)] = by_status.get(str(p.status), 0) + 1
+        return {
+            "id": run.id,
+            "set_name": run.set_name,
+            "stage": str(run.stage),
+            "status": str(run.status),
+            "block_reason": str(run.block_reason) if run.block_reason else None,
+            "error": run.error,
+            "approved": run.approved,
+            "problems": len(run.problems),
+            "by_status": by_status,
+            "updated_at": run.updated_at,
+        }
+
+
+class Dashboard:
+    """Owns the HTTP server. `store` is shared with the scheduler, which is safe."""
+
+    def __init__(self, store: Store, *, host: str = "127.0.0.1", port: int = 8787) -> None:
+        self.store = store
+        # Localhost by default. This has no authentication of its own — remote
+        # access is over the mesh VPN, which is where the access control lives —
+        # so binding it to a public interface would expose the approve action to
+        # anyone who can reach the port.
+        self._server = ThreadingHTTPServer((host, port), _Handler)
+        self._server.store = store  # type: ignore[attr-defined]
+        self._thread: threading.Thread | None = None
+
+    @property
+    def port(self) -> int:
+        return self._server.server_address[1]
+
+    def start(self) -> "Dashboard":
+        # serve_forever polls at 0.5s by default, and shutdown() waits for the
+        # loop to notice — so that interval is the cost of every stop.
+        self._thread = threading.Thread(target=self._server.serve_forever,
+                                        args=(0.05,), name="dashboard", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(5)
+
+    def __enter__(self) -> "Dashboard":
+        return self.start()
+
+    def __exit__(self, *exc: object) -> None:
+        self.stop()
+
+
+PAGE = """<!doctype html>
+<meta charset="utf-8">
+<title>Maestro</title>
+<style>
+  :root { color-scheme: light dark; --line: #8883; --dim: #8888; }
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 1.5rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 1rem; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .4rem .6rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--dim); font-size: .85rem; }
+  tr.sel { background: #8882; }
+  tbody tr { cursor: pointer; }
+  .pill { padding: .05rem .4rem; border-radius: .5rem; border: 1px solid var(--line); font-size: .85rem; }
+  .blocked, .failed { color: #d33; border-color: #d336; }
+  .done { color: #2a2; border-color: #2a26; }
+  .dim { color: var(--dim); }
+  button { font: inherit; padding: .2rem .7rem; margin-right: .4rem; cursor: pointer; }
+  #log { white-space: pre-wrap; max-height: 22rem; overflow-y: auto; border: 1px solid var(--line);
+         padding: .6rem; margin-top: .8rem; }
+  .warn { color: #b80; } .error { color: #d33; }
+  #detail { margin-top: 1.5rem; }
+  #err { color: #d33; }
+</style>
+<h1>Maestro <span class="dim" id="tick"></span></h1>
+<table><thead><tr><th>#</th><th>set</th><th>stage</th><th>status</th><th>problems</th><th>note</th></tr></thead>
+<tbody id="runs"></tbody></table>
+<div id="detail" hidden>
+  <div id="actions"></div>
+  <div id="err"></div>
+  <div id="log"></div>
+</div>
+<script>
+let sel = null, cursor = 0;
+
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+async function post(id, action) {
+  // The guard header is what makes this unreachable from another site's page.
+  const r = await fetch(`/api/runs/${id}/${action}`, {
+    method: "POST", headers: { "X-Maestro": "1" },
+  });
+  if (!r.ok) document.getElementById("err").textContent = (await r.json()).error;
+  cursor = 0; document.getElementById("log").textContent = "";
+  refresh();
+}
+
+function select(id) { sel = id; cursor = 0; document.getElementById("log").textContent = ""; refresh(); }
+
+async function refresh() {
+  const { runs } = await (await fetch("/api/runs")).json();
+  document.getElementById("runs").innerHTML = runs.map(r => `
+    <tr onclick="select(${r.id})" class="${r.id === sel ? "sel" : ""}">
+      <td>${r.id}</td><td>${esc(r.set_name)}</td><td>${esc(r.stage)}</td>
+      <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${r.problems}</td>
+      <td class="dim">${esc(r.block_reason || r.error || "")}</td>
+    </tr>`).join("");
+
+  const detail = document.getElementById("detail");
+  const run = runs.find(r => r.id === sel);
+  detail.hidden = !run;
+  if (run) {
+    const stopped = run.status === "blocked" || run.status === "failed";
+    document.getElementById("actions").innerHTML =
+      (run.approved ? `<span class="dim">approved &middot; </span>` :
+        `<button onclick="post(${run.id},'approve')">approve writes</button>`) +
+      (stopped ? `<button onclick="post(${run.id},'resume')">resume</button>` : "");
+    const { events, cursor: c } = await (await fetch(`/api/runs/${sel}/events?after=${cursor}`)).json();
+    cursor = c;
+    if (events.length) {
+      const log = document.getElementById("log");
+      log.innerHTML += events.map(e =>
+        `<div class="${esc(e.level)}">${esc(e.at)} ${esc(e.slug || "")} ${esc(e.message)}</div>`).join("");
+      log.scrollTop = log.scrollHeight;
+    }
+  }
+  document.getElementById("tick").textContent = new Date().toLocaleTimeString();
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+"""

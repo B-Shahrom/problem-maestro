@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS runs (
     status       TEXT NOT NULL,
     block_reason TEXT,
     error        TEXT,
+    approved     INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -115,6 +116,18 @@ class Store:
         # dashboard, `sqlite3` at a prompt) can still collide on the file.
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that `CREATE TABLE IF NOT EXISTS` will not add to an old file.
+
+        A run database outlives the schema that made it — that is the point of it
+        being durable — so a new column has to be added to a file that already
+        exists, not just to the statement that creates one.
+        """
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(runs)")}
+        if "approved" not in have:
+            self._db.execute("ALTER TABLE runs ADD COLUMN approved INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         with self._lock:
@@ -190,6 +203,7 @@ class Store:
             status=RunStatus(row["status"]),
             block_reason=BlockReason(row["block_reason"]) if row["block_reason"] else None,
             error=row["error"],
+            approved=bool(row["approved"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -225,6 +239,21 @@ class Store:
         args.append(run_id)
         with self._tx() as db:
             db.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
+
+    def approve(self, run_id: int) -> None:
+        """Record an operator's decision to let this run write to ElectiCode.
+
+        Per-run rather than a scheduler-wide flag, because that is the only shape
+        in which `AWAITING_APPROVAL` means anything: a global `apply` cannot be
+        flipped for one batch, so a blocked run could only be released by
+        restarting the process with every other run released too.
+
+        One-way. There is no un-approve: by the time a human would want one the
+        writes have happened, and a flag that pretended otherwise would be worse
+        than honest.
+        """
+        with self._tx() as db:
+            db.execute("UPDATE runs SET approved=1, updated_at=? WHERE id=?", (_now(), run_id))
 
     def block(self, run_id: int, reason: BlockReason, message: str) -> None:
         """Park a run for a human.

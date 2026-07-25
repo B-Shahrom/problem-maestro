@@ -126,6 +126,15 @@ class Run:
     status: RunStatus = RunStatus.PENDING
     block_reason: BlockReason | None = None
     error: str | None = None
+
+    approved: bool = False
+    """An operator has let this run write to ElectiCode.
+
+    Per-run rather than a scheduler-wide `apply` flag, because that is the only
+    shape in which `AWAITING_APPROVAL` means anything — a global flag cannot be
+    flipped for one batch.
+    """
+
     created_at: str = ""
     updated_at: str = ""
     problems: list[Problem] = field(default_factory=list)

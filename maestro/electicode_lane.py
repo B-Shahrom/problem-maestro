@@ -285,7 +285,7 @@ class ElectiCodeLane:
             return report
         report.stage = run.stage
 
-        if not self._preflight(run_id, run.stage, report):
+        if not self._preflight(run, report):
             return report
 
         handler = {
@@ -297,20 +297,26 @@ class ElectiCodeLane:
         handler(run_id, report)
         return report
 
-    def _preflight(self, run_id: int, stage: RunStage, report: LaneReport) -> bool:
+    def _preflight(self, run, report: LaneReport) -> bool:
         """Auth check, then the apply gate. Both park the run rather than failing it.
 
         The session check runs for all four stages. Only `report.py` is browserless,
         and the stage that calls it opens with a catalog scrape that is not.
+
+        The gate opens for a scheduler configured with `apply` **or** for a run an
+        operator approved individually. Approval is per-run because a global flag
+        cannot be granted to one batch: without it, releasing a blocked run would
+        mean releasing every other run at the same time, which is not what anyone
+        looking at one blocked batch is asking for.
         """
-        if not self._session_ok(run_id, report):
+        if not self._session_ok(run.id, report):
             return False
-        if not self.apply and stage in (RunStage.UPLOAD, RunStage.CHORES):
+        if not (self.apply or run.approved) and run.stage in (RunStage.UPLOAD, RunStage.CHORES):
             # The two mutating stages. Reconcile and audit only read, so a
             # preview-mode run still gets to prove what a real one would find.
-            self.store.block(run_id, BlockReason.AWAITING_APPROVAL,
-                             f"stage {stage} would write to ElectiCode — "
-                             f"re-run with apply=True to proceed")
+            self.store.block(run.id, BlockReason.AWAITING_APPROVAL,
+                             f"stage {run.stage} would write to ElectiCode — "
+                             f"approve this run to proceed")
             report.blocked = BlockReason.AWAITING_APPROVAL
             return False
         return True

@@ -580,3 +580,30 @@ def test_a_catalog_without_limits_warns_but_continues(lane):
     assert store.get_run(run_id).stage is RunStage.DONE
     warned = [e["message"] for e in store.events(run_id) if e["level"] == "warn"]
     assert any("could not be verified" in w for w in warned)
+
+
+def test_an_approved_run_writes_without_a_scheduler_wide_apply(lane):
+    """The apply gate has to be releasable for one batch, or it means nothing."""
+    lane_, store, fake, run_id = lane
+    lane_.apply = False
+    assert lane_.step(run_id).blocked is BlockReason.AWAITING_APPROVAL
+
+    store.approve(run_id)
+    store.set_run(run_id, status=RunStatus.RUNNING)
+    report = lane_.step(run_id)
+    assert report.blocked is None
+    assert report.run_advanced_to is RunStage.RECONCILE
+    assert any("--apply" in c for c in fake.calls)
+
+
+def test_approval_does_not_bypass_the_idempotency_rules(lane):
+    """Approving says "you may write", not "retry anything"."""
+    lane_, store, fake, run_id = lane
+    lane_.apply = False
+    store.approve(run_id)
+    fake.exists = set(SLUGS)
+    fake.chores_rc, fake.fail_at = 2, "metadata"
+    _drive(lane_, store, run_id, stages=3)
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "not idempotent" in run.error
