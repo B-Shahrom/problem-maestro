@@ -14,8 +14,8 @@ and exposes one dashboard.
 
 ## Status
 
-Design phase. All three actors have returned their Phase 1 integration manuals; the
-cross-actor analysis is in `docs/analysis/phase1-findings.md`.
+Build phase. Both integration lanes are written and tested; the cross-actor analysis that
+shaped them is in `docs/analysis/phase1-findings.md`.
 
 Headline: **the hand-off works unshaped.** A preview upload confirmed ElectiCode accepts
 Polygon's raw extracted package with the folder named for the slug — no file moves, no
@@ -53,9 +53,15 @@ Design questions are settled. Everything below is build work.
 1. ~~Run 0~~ — **done, passed.** ElectiCode accepts Polygon's raw package; the shaping stage
    collapses to extract + rename folder to slug + delete `*.exe`. See the banner at the top of
    `docs/analysis/seam-verdict.md`.
-2. Phase 2 in both apps — **in progress**, corrections sent.
+2. Phase 2 in both apps — **in progress**. Task channel is `docs/maestro/FROM_MAESTRO.md` /
+   `TO_MAESTRO.md` in each dev's repo.
 3. Build order: ~~job store~~ → ~~ingest + validators~~ → ~~Polygon lane (incl. shaping)~~ →
-   upload → **stage 6.5 reconcile** → post-upload chores → audit gate → dashboard.
+   ~~upload~~ → ~~stage 6.5 reconcile~~ → ~~post-upload chores~~ → ~~audit gate~~ →
+   **scheduler** → dashboard.
+
+Both lanes are built. What remains is the loop that drives them — one process stepping runs
+on a timer, with the Polygon half fanning out per problem and the ElectiCode half strictly
+serial — and the dashboard over the event log.
 
 ## Code
 
@@ -68,8 +74,13 @@ Design questions are settled. Everything below is build work.
 | `maestro/ingest.py` | Stage 1→2: sentinel detection, and telling "still copying" from "invalid" |
 | `maestro/polygon.py` | Middleman client plus the decision policy layered over its error taxonomy |
 | `maestro/polygon_lane.py` | Stages 3–5: one job per problem, quarantine on verify failure, extract into the upload parent |
+| `maestro/scraper.py` | The Scraper's CLIs as a typed surface: exit codes carry the decision, nothing mutates without `apply=True` |
+| `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
 
-`python -m pytest` — 99 tests, no external services required.
+`python -m pytest` — 148 tests, no external services required. One of them
+(`test_characteristics_roundtrip.py`) checks Maestro's rendered characteristics against the
+real `batch.py` parser when a Scraper checkout is present, and skips otherwise; it is the
+only place the mirror parser can be caught drifting from the thing it mirrors.
 
 Secrets (Polygon key/secret, ElectiCode session cookies, Anthropic API key) stay local and
 gitignored. Nothing here is exposed publicly — remote access is over a mesh VPN.
