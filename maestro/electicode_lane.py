@@ -38,7 +38,7 @@ from . import manifest
 from .checks import Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
                     RunStatus)
-from .preflight import limits_landed
+from .preflight import divisions_landed, limits_landed
 from .scraper import Detected, Outcome, Result, ScraperClient
 from .store import Store
 
@@ -545,9 +545,12 @@ class ElectiCodeLane:
         path.write_text(char.render(char.subset(parsed, [p.slug for p in problems])),
                         encoding="utf-8")
 
-        # Maestro's own check: `report audit --char` compares difficulty, tags and
-        # divisions, and nothing anywhere compares limits.
+        # Maestro's own checks, both for the same reason: `report audit --char`
+        # does not compare limits at all, and it silently skips the division check
+        # in exactly the state that most needs it (see `divisions_landed`).
         if self._limits_wrong(run_id, run.set_dir, scrape.data or [], report):
+            return
+        if self._divisions_wrong(run_id, scrape.data or [], problems, report):
             return
 
         r = self.client.audit(self.artefact(run_id, "catalog-after.json"), path,
@@ -597,6 +600,26 @@ class ElectiCodeLane:
                        f"{len(bad)} problem(s) carry the wrong limits on the platform; "
                        "the fields are read-only there, so only a corrected re-import "
                        "fixes it")
+            return True
+        return False
+
+    def _divisions_wrong(self, run_id: int, rows: list[dict], problems: list[Problem],
+                         report: LaneReport) -> bool:
+        """Log the division verdict; fail the run if any grant did not land.
+
+        Unlike a wrong limit this *is* fixable in place — `division set` is
+        idempotent and converges — but it still fails the run rather than warning,
+        because a problem without division access is invisible to the students it
+        was authored for, and a run that ends `done` is a run nobody looks at again.
+        """
+        findings = divisions_landed(self.divisions, rows, [p.slug for p in problems])
+        for f in findings:
+            self.store.log(run_id, "error" if f.severity is Severity.ERROR else "warn",
+                           f"{f.check}: {f.message}", slug=f.slug)
+        if bad := errors(findings):
+            self._fail(run_id, report,
+                       f"{len(bad)} problem(s) are missing the requested division access — "
+                       "they would not be visible to the divisions this run targeted")
             return True
         return False
 

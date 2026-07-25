@@ -43,6 +43,7 @@ class FakeScraper:
         self.catalog_names: dict[str, str] = {}
         self.catalog_limits: dict[str, tuple[int, int]] = {}
         self.emit_limits = True
+        self.division_access = "Electi"
         self.uploaded: list[str] = []
         self.detect_only: list[str] | None = None        # None → every folder handed over
 
@@ -89,7 +90,7 @@ class FakeScraper:
         rows = []
         for s in slugs:
             row = {"s3_id": s, "name": self.catalog_names.get(s, TITLES.get(s, s)),
-                   "difficulty": "Easy", "category": "arrays", "division_access": "Electi"}
+                   "difficulty": "Easy", "category": "arrays", "division_access": self.division_access}
             if self.emit_limits:
                 tl, ml = self.catalog_limits.get(s, (1000, 262144))
                 row["time_limit_ms"], row["memory_limit_kb"] = tl, ml
@@ -607,3 +608,20 @@ def test_approval_does_not_bypass_the_idempotency_rules(lane):
     run = store.get_run(run_id)
     assert run.status is RunStatus.FAILED
     assert "not idempotent" in run.error
+
+
+def test_a_batch_with_no_division_access_fails_the_audit(lane):
+    """`report audit` skips its division check in this exact state and exits 0."""
+    lane_, store, fake, run_id = lane
+    fake.division_access = ""
+    _drive(lane_, store, run_id)
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "division access" in run.error
+    assert not any(c[1].endswith("report.py") for c in fake.calls)
+
+
+def test_granted_divisions_let_the_audit_proceed(lane):
+    lane_, store, fake, run_id = lane
+    _drive(lane_, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE

@@ -2,7 +2,7 @@ import json
 
 from maestro.checks import Severity
 from maestro.ingest import Verdict, inspect
-from maestro.preflight import compare, limits_landed
+from maestro.preflight import compare, divisions_landed, limits_landed
 from maestro.store import Store
 from tests.conftest import SLUGS
 
@@ -204,3 +204,47 @@ def test_an_absent_problem_is_not_a_limits_finding(set_dir):
     """A slug missing from the catalog is stage 6.5's finding, not this one."""
     m = mf(set_dir)
     assert limits_landed(m, catalog_rows(m)[:1]) == []
+
+
+# ---------------------------------------------------------------- divisions
+
+
+def test_matching_divisions_produce_nothing(set_dir):
+    rows = [{"s3_id": s, "division_access": "Electi, Division A"} for s in SLUGS]
+    assert divisions_landed("Electi", rows, SLUGS) == []
+
+
+def test_a_missing_division_is_an_error(set_dir):
+    rows = [{"s3_id": SLUGS[0], "division_access": "Electi"},
+            {"s3_id": SLUGS[1], "division_access": ""}]
+    f = divisions_landed("Electi", rows, SLUGS)
+    assert [(x.check, x.slug) for x in f] == [("D-1", SLUGS[1])]
+    assert "Electi" in f[0].message
+
+
+def test_every_record_empty_is_caught_not_skipped(set_dir):
+    """`report audit` skips the check in this exact state, and still exits 0.
+
+    "No problem has division access" is indistinguishable from "the division step
+    failed", so the tool's skip turns the one detectable failure into a pass.
+    """
+    rows = [{"s3_id": s, "division_access": ""} for s in SLUGS]
+    f = divisions_landed("Electi", rows, SLUGS)
+    assert [x.check for x in f] == ["D-1", "D-1"]
+    assert all(x.severity is Severity.ERROR for x in f)
+
+
+def test_a_catalog_scrape_without_the_field_warns_rather_than_passing(set_dir):
+    rows = [{"s3_id": s, "difficulty": "Easy"} for s in SLUGS]
+    f = divisions_landed("Electi", rows, SLUGS)
+    assert [(x.check, x.severity) for x in f] == [("D-2", Severity.WARN)]
+    assert "could not be verified" in f[0].message
+
+
+def test_no_requested_divisions_means_no_check(set_dir):
+    assert divisions_landed("", [{"s3_id": SLUGS[0], "division_access": ""}], SLUGS) == []
+
+
+def test_division_matching_ignores_case_and_spacing(set_dir):
+    rows = [{"s3_id": s, "division_access": "electi,  Division A+"} for s in SLUGS]
+    assert divisions_landed("Electi, Division A+", rows, SLUGS) == []

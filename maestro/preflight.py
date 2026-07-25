@@ -80,6 +80,54 @@ def limits_landed(manifest: dict[str, Any], rows: list[dict[str, Any]]) -> list[
     return out
 
 
+def divisions_landed(expected: str, rows: list[dict[str, Any]],
+                     slugs: list[str]) -> list[Finding]:
+    """Did every problem get the division access the run asked for? Checks D-1…D-2.
+
+    Maestro checks this itself rather than relying on `report audit --char
+    --divisions`, because that check **skips itself** in the one state that most
+    needs it. The tool drops the division check when no record carries
+    `division_access` — reasonable for a catalog-sourced scrape, which never
+    carries the field — but "no problem has division access" is also exactly what
+    a failed division step looks like, and the skip is announced only on stderr
+    while the exit code stays `0`.
+
+    So the shape Maestro must avoid is: divisions never granted → every record
+    empty → check skipped → audit clean → run marked done. Computing it here
+    costs one comparison over data already in hand.
+    """
+    # Matched case-insensitively, but reported as the operator wrote it — an error
+    # naming `electi` when the config says `Electi` sends them looking for a typo
+    # that isn't there.
+    wanted = [d.strip() for d in (expected or "").replace("\n", ",").split(",") if d.strip()]
+    if not wanted:
+        return []
+
+    by_id = {r.get("s3_id") or r.get("id"): r for r in rows}
+    out: list[Finding] = []
+    seen_field = False
+    for slug in slugs:
+        row = by_id.get(slug)
+        if row is None:
+            continue  # absence is stage 6.5's finding
+        if "division_access" not in row:
+            continue
+        seen_field = True
+        have = {d.strip().lower() for d in (row.get("division_access") or "").split(",") if d.strip()}
+        if missing := [d for d in wanted if d.lower() not in have]:
+            out.append(Finding("D-1", Severity.ERROR,
+                               f"missing division access: {', '.join(missing)} "
+                               f"(has {row.get('division_access') or 'none'})", slug))
+
+    if not seen_field:
+        # A catalog-sourced scrape omits the field entirely. That is not a
+        # failure, but it must not read as a pass either.
+        out.append(Finding("D-2", Severity.WARN,
+                           "the scrape carried no division_access, so the requested divisions "
+                           f"({expected}) could not be verified — re-check with a paged scrape"))
+    return out
+
+
 def compare(manifest: dict[str, Any], parsed: dict[str, Any]) -> list[Finding]:
     """Check a manifest against a `/api/parse` response. Checks are P-1…P-6."""
     out: list[Finding] = []
