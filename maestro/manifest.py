@@ -129,9 +129,15 @@ def validate(set_dir: str | Path, *, extra_tags: set[str] | None = None) -> list
                 err(check, f"{key} {name!r} is missing from the set folder", slug)
                 continue
             if (actual := path.stat().st_size) != spec.get("bytes"):
+                # Stop here. A wrong-length file will also fail its checksum and may
+                # not open as a zip, but neither adds information — and reporting them
+                # would drown the one signal that distinguishes a copy still in flight
+                # from a file that is genuinely corrupt.
                 err(check, f"{name}: {actual} bytes on disk, manifest says {spec.get('bytes')}", slug)
+                continue
             if (digest := _sha256(path)) != spec.get("sha256"):
                 err(check, f"{name}: sha256 {digest[:12]}… does not match the manifest", slug)
+                continue
             if key == "archive":
                 out.extend(_inspect_archive(path, slug))
 

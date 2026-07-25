@@ -54,8 +54,22 @@ Design questions are settled. Everything below is build work.
    collapses to extract + rename folder to slug + delete `*.exe`. See the banner at the top of
    `docs/analysis/seam-verdict.md`.
 2. Phase 2 in both apps — **in progress**, corrections sent.
-3. Build order: job store → Polygon lane → *(shaping: three lines, no longer a stage)* → upload
-   → **stage 6.5 reconcile** → post-upload chores → audit gate → dashboard.
+3. Build order: ~~job store~~ → ~~ingest + validators~~ → Polygon lane → *(shaping: three
+   lines, no longer a stage)* → upload → **stage 6.5 reconcile** → post-upload chores →
+   audit gate → dashboard.
+
+## Code
+
+| Module | What it does |
+|---|---|
+| `maestro/model.py` | The two-level state vocabulary — run stages advance the batch, problem stages advance individually through the Polygon half |
+| `maestro/store.py` | Durable SQLite job store: resume across restarts, quarantine, identity map, cursor-tailed events |
+| `maestro/manifest.py` | `MANIFEST.json` cross-checks M-1…M-14, including opening every archive |
+| `maestro/characteristics.py` | Parses exactly as `batch.py` does, then checks the six things it cannot report |
+| `maestro/ingest.py` | Stage 1→2: sentinel detection, and telling "still copying" from "invalid" |
+| `maestro/polygon.py` | Middleman client plus the decision policy layered over its error taxonomy |
+
+`python -m pytest` — 84 tests, no external services required.
 
 Secrets (Polygon key/secret, ElectiCode session cookies, Anthropic API key) stay local and
 gitignored. Nothing here is exposed publicly — remote access is over a mesh VPN.

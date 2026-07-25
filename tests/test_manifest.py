@@ -133,3 +133,16 @@ def test_uppercase_entry_rejected(set_dir, rewrite):
     rewrite(lambda m: m["problems"][0]["archive"].update(
         {"sha256": _sha(z), "bytes": z.stat().st_size}))
     assert "M-12" in codes(validate(set_dir))
+
+
+def test_short_file_reports_one_cause_not_three(set_dir):
+    """A truncated archive must not also report a checksum and a zip-parse failure.
+
+    Ingest tells "still copying" from "corrupt" by looking at which findings appear,
+    so derivative failures from the same root cause would drown the signal.
+    """
+    z = set_dir / "edu-arrays-running-max.zip"
+    z.write_bytes(z.read_bytes()[:40])
+    f = [x for x in validate(set_dir) if x.slug == "edu-arrays-running-max"]
+    assert len(f) == 1
+    assert "bytes on disk" in f[0].message
