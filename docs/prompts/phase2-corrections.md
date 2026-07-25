@@ -142,8 +142,15 @@ Detected 2 problem(s) (1 already exist):
     edu-testing-best-stretch
 ```
 
-**A. `EXISTS` being aggregate is now demonstrated, not theorised — and it *is* only a parsing
-change.** The output lists both slugs *and* says "1 already exist" — but never says **which
+**A. `EXISTS` being aggregate is now demonstrated, not theorised.**
+
+> ⚠️ **Correction (mine).** I originally wrote that the per-row pairing "is present in the DOM
+> and discarded at extraction," and offered the row-walking snippet below as a confirmed fix.
+> That was an inference from how the *current* extraction is written, not evidence about the
+> modal's structure — the Scraper developer was right to push back. `_read_detection` proves the
+> extraction is flat; it proves nothing about whether the DOM nests each `EXISTS` badge with its
+> id input. **The snippet is a candidate, contingent on a capture, not a confirmed fix.** If
+> `EXISTS` renders detached from the id input, this is real work rather than a parse tweak. The output lists both slugs *and* says "1 already exist" — but never says **which
 one**. Reading `_read_detection` (`:137-153`) shows why: it extracts slugs from
 `root.querySelectorAll("input[type=text]")` and, separately, counts `\bEXISTS\b` across the
 flattened `root.innerText`. The per-row pairing is present in the DOM and discarded at
