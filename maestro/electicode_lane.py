@@ -35,8 +35,10 @@ from pathlib import Path
 
 from . import characteristics as char
 from . import manifest
+from .checks import Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
                     RunStatus)
+from .preflight import limits_landed
 from .scraper import Detected, Outcome, Result, ScraperClient
 from .store import Store
 
@@ -537,6 +539,11 @@ class ElectiCodeLane:
         path.write_text(char.render(char.subset(parsed, [p.slug for p in problems])),
                         encoding="utf-8")
 
+        # Maestro's own check: `report audit --char` compares difficulty, tags and
+        # divisions, and nothing anywhere compares limits.
+        if self._limits_wrong(run_id, run.set_dir, scrape.data or [], report):
+            return
+
         r = self.client.audit(self.artefact(run_id, "catalog-after.json"), path,
                               self.artefact(run_id, "audit.json"),
                               divisions=self.divisions)
@@ -561,6 +568,31 @@ class ElectiCodeLane:
         report.run_advanced_to = RunStage.DONE
         self.store.log(run_id, "info",
                        f"audit clean — {len(problems)} problem(s) match the characteristics")
+
+    def _limits_wrong(self, run_id: int, set_dir: str, rows: list[dict],
+                      report: LaneReport) -> bool:
+        """Log the limits verdict; fail the run if any limit did not land.
+
+        A wrong limit is not a gap the operator can close afterwards — both fields
+        are read-only on the platform, derived from the imported package — so the
+        only fix is a corrected re-import. That makes it a failure rather than
+        something to note and continue past.
+        """
+        try:
+            m = manifest.load(Path(set_dir))
+        except (OSError, ValueError):
+            return False
+        findings = limits_landed(m, rows)
+        for f in findings:
+            self.store.log(run_id, "error" if f.severity is Severity.ERROR else "warn",
+                           f"{f.check}: {f.message}", slug=f.slug)
+        if bad := errors(findings):
+            self._fail(run_id, report,
+                       f"{len(bad)} problem(s) carry the wrong limits on the platform; "
+                       "the fields are read-only there, so only a corrected re-import "
+                       "fixes it")
+            return True
+        return False
 
     @staticmethod
     def _audit_summary(r: Result) -> str:

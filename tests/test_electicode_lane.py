@@ -41,6 +41,8 @@ class FakeScraper:
         self.overwrite_names: dict[str, str] = {}
         self.catalog_slugs: list[str] | None = None      # None → every uploaded slug
         self.catalog_names: dict[str, str] = {}
+        self.catalog_limits: dict[str, tuple[int, int]] = {}
+        self.emit_limits = True
         self.uploaded: list[str] = []
         self.detect_only: list[str] | None = None        # None → every folder handed over
 
@@ -84,9 +86,14 @@ class FakeScraper:
 
     def _problem_scraper(self, argv):
         slugs = self.catalog_slugs if self.catalog_slugs is not None else self.uploaded
-        rows = [{"s3_id": s, "name": self.catalog_names.get(s, TITLES.get(s, s)),
-                 "difficulty": "Easy", "category": "arrays", "division_access": "Electi"}
-                for s in slugs]
+        rows = []
+        for s in slugs:
+            row = {"s3_id": s, "name": self.catalog_names.get(s, TITLES.get(s, s)),
+                   "difficulty": "Easy", "category": "arrays", "division_access": "Electi"}
+            if self.emit_limits:
+                tl, ml = self.catalog_limits.get(s, (1000, 262144))
+                row["time_limit_ms"], row["memory_limit_kb"] = tl, ml
+            rows.append(row)
         Path(self._opt(argv, "--output")).write_text(json.dumps(rows), encoding="utf-8")
         return self.scrape_rc, "", ""
 
@@ -545,3 +552,31 @@ def test_a_quarantined_problem_is_left_out_of_the_chore_file(lane):
     assert chores
     for c in chores:
         assert SLUGS[1] not in Path(c[c.index("--char") + 1]).read_text(encoding="utf-8")
+
+
+def test_a_wrong_limit_on_the_platform_fails_the_audit(lane):
+    """Both fields are read-only there — only a corrected re-import fixes it."""
+    lane_, store, fake, run_id = lane
+    fake.catalog_limits = {SLUGS[0]: (2000, 262144)}   # authored 1 s / 256 MB
+    _drive(lane_, store, run_id)
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "wrong limits" in run.error
+    assert not any(c[1].endswith("report.py") for c in fake.calls)
+
+
+def test_matching_limits_let_the_audit_proceed(lane):
+    lane_, store, fake, run_id = lane
+    _drive(lane_, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE
+    assert any(c[1].endswith("report.py") for c in fake.calls)
+
+
+def test_a_catalog_without_limits_warns_but_continues(lane):
+    """The check is new; its absence must not block a run that is otherwise clean."""
+    lane_, store, fake, run_id = lane
+    fake.emit_limits = False
+    _drive(lane_, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE
+    warned = [e["message"] for e in store.events(run_id) if e["level"] == "warn"]
+    assert any("could not be verified" in w for w in warned)

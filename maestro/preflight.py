@@ -29,6 +29,57 @@ _COMPONENTS = {
 }
 
 
+def limits_landed(manifest: dict[str, Any], rows: list[dict[str, Any]]) -> list[Finding]:
+    """Did the authored time and memory limits survive the trip? Check L-1…L-2.
+
+    This is the far end of the chain that `polygon_lane` starts by sending the
+    limits on import. Sending them is necessary but not sufficient — the value
+    passes through the Middleman, `problem.updateInfo`, a Polygon package build,
+    a download, and an ElectiCode upload before anyone sees it, and no stage in
+    between reports what it applied.
+
+    ElectiCode's own catalog does, which makes this the only place the round trip
+    can be closed. It is worth closing because a wrong limit is otherwise
+    permanently invisible: it fails no import, no build, no verify and no audit,
+    and the platform renders both fields read-only.
+
+    Rows without the fields yield a single finding saying so rather than silence —
+    "could not check" and "checked, fine" must not look the same.
+    """
+    out: list[Finding] = []
+    declared = {p.get("slug"): (p.get("limits") or {})
+                for p in manifest.get("problems") or [] if p.get("slug")}
+    by_id = {r.get("s3_id") or r.get("id"): r for r in rows}
+
+    checked = 0
+    for slug, limits in sorted(declared.items()):
+        row = by_id.get(slug)
+        if row is None:
+            continue  # absence is stage 6.5's finding, not this one
+        # The catalog reports milliseconds and kilobytes; the manifest is authored
+        # in seconds and megabytes.
+        for label, want, got, scale, unit in (
+            ("time limit", limits.get("time_limit_s"), row.get("time_limit_ms"), 1000, "ms"),
+            ("memory limit", limits.get("memory_limit_mb"), row.get("memory_limit_kb"), 1024, "KB"),
+        ):
+            if want is None or got is None:
+                continue
+            checked += 1
+            if int(round(float(want) * scale)) != int(got):
+                out.append(Finding(
+                    "L-1", Severity.ERROR,
+                    f"{label}: authored {want:g} ({int(round(float(want) * scale))} {unit}), "
+                    f"the platform has {int(got)} {unit}", slug))
+
+    if declared and not checked:
+        out.append(Finding(
+            "L-2", Severity.WARN,
+            "the catalog carried no time_limit_ms/memory_limit_kb, so the authored "
+            "limits could not be verified — they are read-only on the platform, so "
+            "nothing else will check them"))
+    return out
+
+
 def compare(manifest: dict[str, Any], parsed: dict[str, Any]) -> list[Finding]:
     """Check a manifest against a `/api/parse` response. Checks are P-1…P-6."""
     out: list[Finding] = []

@@ -2,7 +2,7 @@ import json
 
 from maestro.checks import Severity
 from maestro.ingest import Verdict, inspect
-from maestro.preflight import compare
+from maestro.preflight import compare, limits_landed
 from maestro.store import Store
 from tests.conftest import SLUGS
 
@@ -146,3 +146,61 @@ def test_without_a_parser_nothing_changes(tmp_path, set_dir):
         result = inspect(set_dir, store)
     assert result.verdict is Verdict.READY
     assert not any(f.check.startswith("P-") for f in result.findings)
+
+
+# ------------------------------------------------------------------- limits
+
+
+def catalog_rows(manifest, **override):
+    """What the ElectiCode catalog reports: milliseconds and kilobytes."""
+    rows = []
+    for p in manifest["problems"]:
+        lim = p["limits"]
+        rows.append({"s3_id": p["slug"],
+                     "time_limit_ms": int(lim["time_limit_s"] * 1000),
+                     "memory_limit_kb": int(lim["memory_limit_mb"] * 1024)})
+    for k, v in override.items():
+        rows[0][k] = v
+    return rows
+
+
+def test_matching_limits_produce_nothing(set_dir):
+    m = mf(set_dir)
+    assert limits_landed(m, catalog_rows(m)) == []
+
+
+def test_a_wrong_time_limit_is_an_error(set_dir):
+    """1s authored, 2s on the platform — invisible to every other check."""
+    m = mf(set_dir)
+    f = limits_landed(m, catalog_rows(m, time_limit_ms=2000))
+    assert [(x.check, x.slug) for x in f] == [("L-1", SLUGS[0])]
+    assert "1000 ms" in f[0].message and "2000 ms" in f[0].message
+
+
+def test_a_wrong_memory_limit_is_an_error(set_dir):
+    m = mf(set_dir)
+    f = limits_landed(m, catalog_rows(m, memory_limit_kb=131072))
+    assert [x.check for x in f] == ["L-1"]
+    assert "memory limit" in f[0].message
+
+
+def test_the_units_are_converted_not_compared_raw(set_dir):
+    """The manifest is seconds and megabytes; the catalog is ms and KB."""
+    m = mf(set_dir)
+    assert limits_landed(m, catalog_rows(m, time_limit_ms=1)) != []
+    assert limits_landed(m, catalog_rows(m, memory_limit_kb=256)) != []
+
+
+def test_a_catalog_without_the_fields_says_so(set_dir):
+    """"Could not check" and "checked, fine" must not look the same."""
+    m = mf(set_dir)
+    rows = [{"s3_id": p["slug"]} for p in m["problems"]]
+    f = limits_landed(m, rows)
+    assert [x.check for x in f] == ["L-2"]
+    assert f[0].severity is Severity.WARN
+
+
+def test_an_absent_problem_is_not_a_limits_finding(set_dir):
+    """A slug missing from the catalog is stage 6.5's finding, not this one."""
+    m = mf(set_dir)
+    assert limits_landed(m, catalog_rows(m)[:1]) == []

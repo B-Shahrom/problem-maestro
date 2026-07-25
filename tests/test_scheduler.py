@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from maestro.model import BlockReason, ProblemSeed, RunStage, RunStatus
+from maestro.model import ProblemSeed, RunStage, RunStatus
 from maestro.scheduler import Scheduler
 from maestro.store import Store
 
