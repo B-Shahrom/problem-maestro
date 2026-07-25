@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .checks import Finding, Severity
 
@@ -103,6 +103,73 @@ def parse(text: str) -> Characteristics:
             if m := _TAG_LINE_RE.match(ln):
                 out.tags.append(m.group(1).strip())
     return out
+
+
+def subset(c: Characteristics, slugs: Iterable[str]) -> Characteristics:
+    """The same document restricted to `slugs`, preserving order.
+
+    Stage 7 needs this twice over. `batch.py --tags-mode` is a **whole-run**
+    setting while `exists` is per-problem, so a batch mixing fresh and
+    pre-existing problems has to be split into two invocations. Quarantined
+    problems have to come out of both — they were never uploaded, so choring them
+    would target a slug that does not exist on the platform.
+
+    Tags travel with their rows or not at all. `build_plan` pairs tag line *k* to
+    row *k* positionally, so filtering rows without filtering tags in lockstep
+    would mis-tag every problem after the first gap. When the counts already
+    disagree the tags were going to be dropped wholesale anyway, so the subset
+    drops them explicitly rather than inventing an alignment.
+    """
+    keep = set(slugs)
+    aligned = c.tags_will_apply
+    rows, tags = [], []
+    for i, row in enumerate(c.rows):
+        if row.slug not in keep:
+            continue
+        rows.append(row)
+        if aligned:
+            tags.append(c.tags[i])
+    return Characteristics(name=c.name, rows=rows, tags=tags,
+                           general_found=c.general_found)
+
+
+_COLUMNS = ("#", "slug", "title", "group", "subtasks", "languages")
+
+
+def render(c: Characteristics) -> str:
+    """Emit a document `batch.py parse_characteristics` reads back unchanged.
+
+    A cell containing `|` is refused rather than escaped: the real parser splits
+    rows on a bare `|` with no escape syntax at all, so any accommodation here
+    would produce a file that round-trips through Maestro and then silently
+    mis-parses in the tool that matters.
+    """
+    def cell(value: str, slug: str, column: str) -> str:
+        if "|" in value:
+            raise ValueError(
+                f"{slug}: the {column} contains '|', which would split the "
+                f"characteristics table into the wrong columns: {value!r}"
+            )
+        return value
+
+    out = [f"# Characteristics — {c.name}" if c.name else "# Characteristics — batch", ""]
+    out += ["## General", "",
+            "| " + " | ".join(_COLUMNS) + " |",
+            "|" + "|".join("---" for _ in _COLUMNS) + "|"]
+    for i, r in enumerate(c.rows, 1):
+        out.append("| " + " | ".join([
+            str(i),
+            cell(r.slug, r.slug, "slug"),
+            cell(r.title, r.slug, "title"),
+            cell(r.group, r.slug, "group"),
+            cell(r.subtasks or "none", r.slug, "subtasks"),
+            cell(r.languages, r.slug, "languages"),
+        ]) + " |")
+
+    # Tag lines are bullets, not table cells, so `|` is safe in them.
+    out += ["", "## Suggested tags", ""]
+    out += [f"{i}. {t}" for i, t in enumerate(c.tags, 1)] or ["[none]"]
+    return "\n".join(out) + "\n"
 
 
 def precheck(char_path: str | Path, manifest: dict[str, Any]) -> list[Finding]:
