@@ -102,6 +102,10 @@ class Problem:
     polygon_package_id: int | None = None
     electicode_slug: str | None = None
 
+    polygon_job_id: str | None = None
+    attempts: int = 0
+    """Tries at the *current* stage. Reset when the stage advances."""
+
     existed_before_upload: bool | None = None
     """Drives the reset-vs-add tag decision.
 

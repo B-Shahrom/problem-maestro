@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS problems (
     polygon_package_id    INTEGER,
     electicode_slug       TEXT,
     existed_before_upload INTEGER,
+    polygon_job_id        TEXT,
+    attempts              INTEGER NOT NULL DEFAULT 0,
     updated_at            TEXT    NOT NULL,
     PRIMARY KEY (run_id, slug)
 );
@@ -225,6 +227,8 @@ class Store:
             polygon_package_id=r["polygon_package_id"],
             electicode_slug=r["electicode_slug"],
             existed_before_upload=None if existed is None else bool(existed),
+            polygon_job_id=r["polygon_job_id"],
+            attempts=r["attempts"],
         )
 
     def set_problem(
@@ -239,7 +243,14 @@ class Store:
         polygon_package_id: int | None = None,
         electicode_slug: str | None = None,
         existed_before_upload: bool | None = None,
+        polygon_job_id: str | None = None,
     ) -> None:
+        """Update one problem.
+
+        Advancing `stage` resets `attempts` to 0: the counter tracks tries at the
+        *current* stage, so a retry budget spent on import must not be inherited by
+        the build that follows it.
+        """
         sets, args = ["updated_at=?"], [_now()]
         for col, val in (
             ("stage", str(stage) if stage else None),
@@ -249,9 +260,12 @@ class Store:
             ("polygon_package_id", polygon_package_id),
             ("electicode_slug", electicode_slug),
             ("existed_before_upload", None if existed_before_upload is None else int(existed_before_upload)),
+            ("polygon_job_id", polygon_job_id),
         ):
             if val is not None:
                 sets.append(f"{col}=?"); args.append(val)
+        if stage is not None:
+            sets.append("attempts=0")
         args += [run_id, slug]
         with self._tx() as db:
             cur = db.execute(
@@ -259,6 +273,28 @@ class Store:
             )
             if cur.rowcount == 0:
                 raise KeyError(f"no problem {slug!r} in run {run_id}")
+
+    def bump_attempt(self, run_id: int, slug: str) -> int:
+        """Record another try at the current stage and return the new count."""
+        with self._tx() as db:
+            db.execute(
+                "UPDATE problems SET attempts=attempts+1, updated_at=? WHERE run_id=? AND slug=?",
+                (_now(), run_id, slug),
+            )
+        row = self._db.execute(
+            "SELECT attempts FROM problems WHERE run_id=? AND slug=?", (run_id, slug)
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"no problem {slug!r} in run {run_id}")
+        return int(row["attempts"])
+
+    def clear_job(self, run_id: int, slug: str) -> None:
+        """Forget the Polygon job id — the next step resubmits from scratch."""
+        with self._tx() as db:
+            db.execute(
+                "UPDATE problems SET polygon_job_id=NULL, updated_at=? WHERE run_id=? AND slug=?",
+                (_now(), run_id, slug),
+            )
 
     def quarantine(self, run_id: int, slug: str, reason: str) -> None:
         """Drop one problem from the batch and keep the run going.

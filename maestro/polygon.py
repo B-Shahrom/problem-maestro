@@ -151,9 +151,14 @@ class PolygonClient:
         """Poll a job. Returns `(http_status, body)` — 404 is expected after a restart."""
         return self._call("GET", f"/api/verify-status/{job_id}")
 
-    def download_package(self, job_id: str, problem_id: int | None = None) -> tuple[int, Any]:
+    def download_package(self, job_id: str, problem_id: int | None = None) -> tuple[int, bytes]:
+        """Fetch the READY package. Returns raw zip bytes — never JSON-decoded.
+
+        A 404 here means "not built yet", which `decide` maps to WAIT rather than
+        an error; the body carries the reason as text.
+        """
         q = f"?problemId={problem_id}" if problem_id is not None else ""
-        return self._call("GET", f"/api/download-package/{job_id}{q}")
+        return self._send("GET", f"{self.base}/api/download-package/{job_id}{q}", None)
 
 
 def problem_decisions(status: int, body: dict[str, Any], attempts: dict[str, int] | None = None) -> dict[str, Decision]:
