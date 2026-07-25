@@ -14,9 +14,11 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 #: `STEP_FAILED` covers both a transient Polygon HTML-instead-of-JSON response and a
@@ -100,20 +102,43 @@ def decide(
         return Decision(Action.HALT, f"unrecognised clientAction {client_action!r}")
 
 
-Transport = Callable[[str, str, dict[str, Any] | None], tuple[int, bytes]]
-"""(method, url, body) -> (status, raw). Injected so tests need no live service."""
+Transport = Callable[[str, str, bytes | None, dict[str, str]], tuple[int, bytes]]
+"""(method, url, body, headers) -> (status, raw). Injected so tests need no live service.
+
+Bytes rather than a dict because the import endpoint takes real multipart file
+uploads, not a JSON manifest of paths.
+"""
 
 
-def _urllib_transport(method: str, url: str, body: dict[str, Any] | None) -> tuple[int, bytes]:
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if data:
-        req.add_header("Content-Type", "application/json")
+def _urllib_transport(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> tuple[int, bytes]:
+    req = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
+
+
+def _multipart(files: list[Path], fields: dict[str, str]) -> tuple[bytes, str]:
+    """Encode archives as `files` parts plus form fields, per the endpoint's signature.
+
+    `POST /api/import-problem` declares `files: List[UploadFile] = File(...)` with
+    `timeLimit` / `memoryLimit` / `onExists` / `checkerType` / `solutionType` as
+    optional form fields — so a JSON body of paths is rejected outright.
+    """
+    boundary = "----maestro" + uuid.uuid4().hex
+    out = bytearray()
+    for k, v in fields.items():
+        out += f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+    for path in files:
+        out += (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files"; filename="{path.name}"\r\n'
+            f"Content-Type: application/zip\r\n\r\n"
+        ).encode()
+        out += path.read_bytes() + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
 class PolygonClient:
@@ -127,8 +152,8 @@ class PolygonClient:
         self.base = base_url.rstrip("/")
         self._send = transport or _urllib_transport
 
-    def _call(self, method: str, path: str, body: dict[str, Any] | None = None) -> tuple[int, Any]:
-        status, raw = self._send(method, f"{self.base}{path}", body)
+    def _call(self, method: str, path: str) -> tuple[int, Any]:
+        status, raw = self._send(method, f"{self.base}{path}", None, {})
         try:
             return status, json.loads(raw) if raw else None
         except json.JSONDecodeError:
@@ -136,16 +161,27 @@ class PolygonClient:
             # folds that into VERIFY_UNKNOWN, but a proxied endpoint could still leak it.
             return status, {"detail": raw[:200].decode("utf-8", "replace")}
 
-    def import_problem(self, archives: list[str]) -> dict[str, Any]:
-        """Submit archives. Returns the 202 job snapshot.
+    def import_problem(self, archives: list[str | Path], *, on_exists: str = "fill") -> dict[str, Any]:
+        """Submit archives as multipart. Returns the 202 job snapshot.
 
-        Multipart upload is left to the caller's transport; `archives` are paths the
-        transport is expected to attach as `files`.
+        `on_exists="fill"` is the endpoint's own default and the behaviour Maestro
+        relies on for retries: a re-submitted slug reuses the same Polygon problem
+        instead of creating a duplicate.
+
+        Passing a main archive and its `<slug>-tests` pack together is correct —
+        the endpoint merges same-slug archives into one problem.
         """
-        status, body = self._call("POST", "/api/import-problem", {"files": archives})
+        paths = [Path(a) for a in archives]
+        body, content_type = _multipart(paths, {"onExists": on_exists})
+        status, raw = self._send("POST", f"{self.base}/api/import-problem", body,
+                                 {"Content-Type": content_type})
+        try:
+            parsed = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            parsed = {"detail": raw[:200].decode("utf-8", "replace")}
         if status != 202:
-            raise PolygonError(status, (body or {}).get("detail", "import rejected"))
-        return body
+            raise PolygonError(status, (parsed or {}).get("detail", "import rejected"))
+        return parsed
 
     def verify_status(self, job_id: str) -> tuple[int, dict[str, Any]]:
         """Poll a job. Returns `(http_status, body)` — 404 is expected after a restart."""
@@ -158,7 +194,7 @@ class PolygonClient:
         an error; the body carries the reason as text.
         """
         q = f"?problemId={problem_id}" if problem_id is not None else ""
-        return self._send("GET", f"{self.base}/api/download-package/{job_id}{q}", None)
+        return self._send("GET", f"{self.base}/api/download-package/{job_id}{q}", None, {})
 
 
 def problem_decisions(status: int, body: dict[str, Any], attempts: dict[str, int] | None = None) -> dict[str, Decision]:

@@ -97,7 +97,7 @@ def test_lost_job_folds_to_a_single_decision():
 
 def fake(responses):
     calls = []
-    def transport(method, url, body):
+    def transport(method, url, body, headers=None):
         calls.append((method, url, body))
         status, payload = responses.pop(0)
         return status, json.dumps(payload).encode() if payload is not None else b""
@@ -105,23 +105,30 @@ def fake(responses):
     return transport
 
 
-def test_import_returns_job_snapshot():
+def test_import_sends_real_multipart(tmp_path):
+    """The endpoint declares files: List[UploadFile] — a JSON list of paths 422s."""
+    z = tmp_path / "a.zip"; z.write_bytes(b"PK\x03\x04payload")
     t = fake([(202, {"jobId": "j9", "state": "running", "problems": [], "parseErrors": []})])
     c = PolygonClient(transport=t)
-    assert c.import_problem(["a.zip"])["jobId"] == "j9"
-    assert t.calls[0][0] == "POST"
+    assert c.import_problem([z])["jobId"] == "j9"
+    method, url, body = t.calls[0]
+    assert method == "POST" and body is not None
+    assert b'name="files"; filename="a.zip"' in body
+    assert b"PK\x03\x04payload" in body          # the actual bytes, not the path
+    assert b'name="onExists"' in body and b"fill" in body   # idempotent retry default
 
 
-def test_import_rejection_raises():
+def test_import_rejection_raises(tmp_path):
+    z = tmp_path / "a.zip"; z.write_bytes(b"x")
     t = fake([(422, {"detail": "missing files"})])
     with pytest.raises(PolygonError) as e:
-        PolygonClient(transport=t).import_problem([])
+        PolygonClient(transport=t).import_problem([z])
     assert e.value.status == 422
 
 
 def test_non_json_body_does_not_crash_the_client():
     """Polygon has been seen returning HTML on a transient; never let that raise."""
-    def transport(method, url, body):
+    def transport(method, url, body, headers=None):
         return 200, b"<html>gateway hiccup</html>"
     status, payload = PolygonClient(transport=transport).verify_status("j1")
     assert status == 200 and "gateway hiccup" in payload["detail"]

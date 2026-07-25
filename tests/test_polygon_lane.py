@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import zipfile
 
 import pytest
@@ -36,12 +37,14 @@ class FakeMiddleman:
         self.submits: list[list[str]] = []
         self._n = 0
 
-    def __call__(self, method, url, body):
+    def __call__(self, method, url, body, headers=None):
         if method == "POST" and url.endswith("/api/import-problem"):
-            self.submits.append(body["files"])
+            names = re.findall(rb'filename="([^"]+)"', body)
+            files = [n.decode() for n in names]
+            self.submits.append(files)
             self._n += 1
             job = f"job{self._n}"
-            slug = self._slug_of(body["files"][0])
+            slug = self._slug_of(files[0])
             self.jobs[job] = slug
             return 202, json.dumps({"jobId": job, "state": "running",
                                     "problems": [], "parseErrors": []}).encode()
