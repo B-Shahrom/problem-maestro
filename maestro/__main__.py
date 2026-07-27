@@ -21,6 +21,7 @@ import signal
 import sys
 from pathlib import Path
 
+from . import brief as brief_mod
 from . import feedback
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
@@ -288,6 +289,43 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_brief(args: argparse.Namespace) -> int:
+    """Render the authoring brief for one set. Stage 0, by hand for now.
+
+    Goes to stdout rather than a file so it can be piped or pasted, and because
+    the brief is not a durable artefact — it is derived from the store and the
+    gate's own constants, so regenerating it is always cheaper than finding the
+    copy that was sent.
+    """
+    cfg = load_config(args.config)
+    try:
+        mix = brief_mod.parse_mix(args.mix)
+    except ValueError as e:
+        raise SystemExit(str(e))
+
+    b = brief_mod.Brief(
+        name=args.name,
+        prefix=args.prefix or "",
+        topic=args.topic or "",
+        mix=mix,
+        languages=tuple(x.strip() for x in args.languages.split(",") if x.strip()),
+        notes=args.notes or "",
+    )
+
+    # The store answers one question no flag can: whether this name is already
+    # spent. `set_name` is UNIQUE, so a repeat is delivered into silence.
+    with Store(cfg["db"]) as store:
+        taken = {r.set_name for r in store.list_runs()}
+    if problems := brief_mod.check(b, taken):
+        for f in problems:
+            print(f"  - {f.message}", file=sys.stderr)
+        return 1
+
+    contracts = Path(args.contracts) if args.with_contracts else None
+    print(brief_mod.render(b, contracts_dir=contracts))
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Validate the config without starting anything. Run this first."""
     cfg = load_config(args.config)
@@ -327,6 +365,20 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
+    p_brief = sub.add_parser("brief", help="Render the authoring brief for a new set.")
+    p_brief.add_argument("name", help="The set name — `set.name` in the manifest.")
+    p_brief.add_argument("--mix", required=True,
+                         help="Problems per group: `easy=2,medium=2,hard=1` or `2:2:1`.")
+    p_brief.add_argument("--prefix", help="Shared slug prefix, e.g. edu-arrays.")
+    p_brief.add_argument("--topic", help="One line on what the set covers.")
+    p_brief.add_argument("--languages", default="EN", help="Statement languages, comma-separated.")
+    p_brief.add_argument("--notes", help="Anything else the author needs for this set.")
+    p_brief.add_argument("--with-contracts", action="store_true",
+                         help="Inline the contract documents, for a session that lacks them.")
+    p_brief.add_argument("--contracts", default="docs/contracts",
+                         help="Where the contract documents live.")
+    p_brief.set_defaults(func=cmd_brief)
+
     p_inspect = sub.add_parser("inspect", help="Say what Maestro makes of each watch-dir folder.")
     p_inspect.add_argument("--report", action="store_true",
                            help="Also write a correction request beside each rejected folder, "

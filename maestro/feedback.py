@@ -252,6 +252,33 @@ CLAUSES: dict[str, Clause] = {
         "electicode-fields.md (docs/analysis)",
         "Nothing to fix. The scrape did not carry `division_access`, so the grant "
         "could not be confirmed — re-check with a paged scrape."),
+
+    # B-* fire before any authoring starts, so their reader is the operator
+    # writing the brief rather than the author correcting a set. They are here
+    # anyway: the rule is that no check code in this package exists without
+    # guidance, and a prefix carve-out is how that rule would quietly rot.
+    "B-1": Clause(
+        "A set name is used once. `set_name` is UNIQUE in the store, and a repeat "
+        "returns ALREADY_INGESTED.",
+        "author-lane.md §1 (docs/analysis)",
+        "Pick another name for a new set. If this is a correction to a set that was "
+        "already ingested, it is a redelivery, not a new brief — and a redelivery of "
+        "an *ingested* set has to be dealt with on the platform, not at the gate."),
+    "B-2": Clause(
+        "The slug prefix can begin a legal slug.",
+        "MANIFEST_SPEC.md §3 M-5",
+        "Fix the prefix before sending the brief. Every slug derived from it would "
+        "otherwise fail M-5 after the whole set was authored."),
+    "B-3": Clause(
+        "The brief states how many problems to write, per difficulty group.",
+        "author-lane.md §1 (docs/analysis)",
+        "Give a difficulty mix. The count is its sum, so there is no separate total "
+        "that could disagree with it."),
+    "B-4": Clause(
+        "The brief names the statement languages.",
+        "CHARACTERISTICS_SPEC.md §2 File layout",
+        "Name at least one language, and the same set for every problem in the set — "
+        "the chore runner applies a single global `--targets` per run (C-6)."),
 }
 
 _UNKNOWN = Clause(

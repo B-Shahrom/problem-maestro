@@ -5,10 +5,15 @@ what to author, authoring it, and getting a rejected set corrected — is a huma
 relaying messages between a chat window and a watch directory. This is the design
 for closing that, and the reasoning about which parts should be a model at all.
 
-**Recommendation up front:** build the correction loop first (done — see
-`maestro/feedback.py`), then the brief; use **Managed Agents** rather than the
-Claude API with a sandbox of our own when the authoring step is automated; and do
-**not** move Maestro's gate into a model under any of it.
+**Recommendation up front:** build the correction loop first (done —
+`maestro/feedback.py`), then the brief (done — `maestro/brief.py`); use **Managed
+Agents** rather than the Claude API with a sandbox of our own when the authoring
+step is automated; and do **not** move Maestro's gate into a model under any of
+it.
+
+Both built pieces work today with the human relay and need no API key, which is
+the point of the ordering — the exchange is closed by hand before it is closed by
+a model, so the model is replacing a working loop rather than defining one.
 
 ---
 
@@ -18,7 +23,7 @@ Three exchanges, not one. They have different shapes and very different risk.
 
 | # | Exchange | Direction | Today | Hard part |
 |---|---|---|---|---|
-| 0 | **Brief** — topic, count, difficulty mix, language targets, tag vocabulary | Maestro → author | Operator writes it by hand | Almost none; the contracts already exist as documents |
+| 0 | **Brief** — topic, count, difficulty mix, language targets, tag vocabulary | Maestro → author | `maestro brief` | Almost none; the contracts already exist as documents |
 | 1 | **Delivery** — statements, checkers, solutions, tests, editorial, `characteristics.md`, `MANIFEST.json` | author → Maestro | Human downloads archives out of a chat and drops them in `watch_dir` | Authoring requires **running code** |
 | 2 | **Correction** — a rejected set, and what to change | Maestro → author | One line in a tick report; the author never sees it | Turning an observation into an instruction |
 
@@ -126,11 +131,19 @@ Each step is useful on its own and none of them requires the next.
 **A. Correction requests — done.** `maestro/feedback.py`, wired into the sweep
 and into `maestro inspect --report`. Works with the human relay, needs no API key.
 
-**B. `maestro brief` — next, still no API key.** Render the set brief and the four
-contracts into one payload the operator pastes into the Claude project. The
-contracts are already written; this is assembly plus a `set.name`, a slug prefix,
-a count and a difficulty mix. It removes the step where a human re-explains the
-output contract from memory, which is where deliveries drift.
+**B. `maestro brief` — done.** `maestro/brief.py`, still no API key. Renders the
+per-set instruction from the constants the gate actually enforces — `VOCABULARY`,
+`SLUG_RE` and `SUPPORTED_SCHEMA` are read from `manifest.py`, not retyped, so the
+brief and the gate are physically the same fact and a test pins that. It refuses
+a brief whose set name is already taken (`set_name` is UNIQUE, so authoring
+against one delivers into silence) or whose slug prefix cannot begin a legal
+slug. `--with-contracts` inlines the four documents verbatim for a session that
+lacks them, and announces any it could not read rather than shipping three of
+four quietly.
+
+It does **not** summarise the contracts. A summary of a contract is a second copy
+of it, and the two diverge — the same reasoning that makes the vocabulary
+generated rather than written.
 
 **C. Managed Agents session.** Agent config = the contracts as its system prompt;
 sandbox writes the set; Maestro pulls it into `watch_dir` and the existing gate
