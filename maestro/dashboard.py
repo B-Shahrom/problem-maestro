@@ -5,16 +5,19 @@ a run parked on an expired session, a batch stopped mid-chore chain, an audit
 that found a gap. Those states were designed to wait for a human, and until now
 the only way to see or clear one was `sqlite3` at a prompt.
 
-Two mutations, and only two — `approve` and `resume`. Both are decisions the
-state machine deliberately refuses to make for itself:
+Three mutations, and only three. Each is a decision the state machine
+deliberately refuses to make for itself:
 
 * **approve** opens the apply gate for one run. Per-run because a scheduler-wide
   `apply` cannot be granted to a single batch.
 * **resume** clears FAILED or BLOCKED back to RUNNING. Nothing else in the system
   does this, on purpose: a run stops so that a person looks at it, and code that
   un-stopped runs on a timer would make every stop meaningless.
+* **forget** deletes the run. The only destructive action here, and the only one
+  that is not reversible — see `Store.delete_run` for what it does and, more
+  importantly, what it does not undo.
 
-Neither retries anything by itself. Clearing the status only makes the run
+None of them retries anything by itself. Clearing the status only makes the run
 eligible for the next tick, and the lane's own idempotency rules still decide
 what actually happens — approving a run does not bypass them.
 """
@@ -95,12 +98,14 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "bad run id"})
         action = parts[3]
-        if action not in ("approve", "resume"):
+        if action not in ("approve", "resume", "forget"):
             return self._send(404, {"error": f"unknown action {action!r}"})
 
         run = self._store.get_run(run_id)
         if run is None:
             return self._send(404, {"error": f"no run {run_id}"})
+        if action == "forget":
+            return self._forget(run)
         getattr(self, f"_{action}")(run)
         self._send(200, {"run": self._summary(self._store.get_run(run_id))})
 
@@ -113,6 +118,23 @@ class _Handler(BaseHTTPRequestHandler):
             # An approval that left the run blocked would need a second click to
             # do anything, and the operator has already said what they want.
             self._resume(run)
+
+    def _forget(self, run) -> None:
+        """Delete a run, unless a subprocess is still working on its behalf.
+
+        The refusal is the point. A browser driving an upload for run 12 does not
+        stop because run 12 was deleted — it carries on writing to the platform
+        for a batch Maestro no longer has any record of, and every store call the
+        lane makes afterwards fails against rows that are gone. Stopping the
+        scheduler first is one action; recovering from that state is several.
+        """
+        sched = getattr(self.server, "scheduler", None)
+        if sched is not None and sched.current_electicode == run.id:
+            return self._send(409, {"error": (
+                f"run {run.id} is being uploaded right now — stop Maestro (or wait "
+                f"for the stage to finish) before deleting it")})
+        self._store.delete_run(run.id)
+        self._send(200, {"deleted": run.id, "set_name": run.set_name})
 
     def _resume(self, run) -> None:
         if run.status not in (RunStatus.FAILED, RunStatus.BLOCKED):
@@ -160,14 +182,18 @@ class _Handler(BaseHTTPRequestHandler):
 class Dashboard:
     """Owns the HTTP server. `store` is shared with the scheduler, which is safe."""
 
-    def __init__(self, store: Store, *, host: str = "127.0.0.1", port: int = 8787) -> None:
+    def __init__(self, store: Store, *, host: str = "127.0.0.1", port: int = 8787,
+                 scheduler=None) -> None:
         self.store = store
+        self.scheduler = scheduler
         # Localhost by default. This has no authentication of its own — remote
         # access is over the mesh VPN, which is where the access control lives —
         # so binding it to a public interface would expose the approve action to
         # anyone who can reach the port.
         self._server = ThreadingHTTPServer((host, port), _Handler)
         self._server.store = store  # type: ignore[attr-defined]
+        # Read by `forget` so a delete cannot land under a live upload.
+        self._server.scheduler = scheduler  # type: ignore[attr-defined]
         self._thread: threading.Thread | None = None
 
     @property
@@ -212,6 +238,8 @@ PAGE = """<!doctype html>
   .done { color: #2a2; border-color: #2a26; }
   .dim { color: var(--dim); }
   button { font: inherit; padding: .2rem .7rem; margin-right: .4rem; cursor: pointer; }
+  button.danger { color: #d33; float: right; margin-right: 0; }
+  .debug { color: var(--dim); }
   #log { white-space: pre-wrap; max-height: 22rem; overflow-y: auto; border: 1px solid var(--line);
          padding: .6rem; margin-top: .8rem; }
   .warn { color: #b80; } .error { color: #d33; }
@@ -231,12 +259,22 @@ let sel = null, cursor = 0;
 
 const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 
-async function post(id, action) {
+async function post(id, action, name) {
+  // The one destructive action asks first, and names what it cannot undo. The
+  // record goes; anything already on Polygon or ElectiCode stays.
+  if (action === "forget" && !confirm(
+      `Delete run ${id} (${name}) from Maestro?\n\n` +
+      `This removes Maestro's record only. Problems already imported to Polygon ` +
+      `or uploaded to ElectiCode are NOT removed.\n\n` +
+      `The set folder becomes eligible for ingest again, so leaving it in the ` +
+      `watch directory will start the whole run over.`)) return;
   // The guard header is what makes this unreachable from another site's page.
   const r = await fetch(`/api/runs/${id}/${action}`, {
     method: "POST", headers: { "X-Maestro": "1" },
   });
   if (!r.ok) document.getElementById("err").textContent = (await r.json()).error;
+  else document.getElementById("err").textContent = "";
+  if (action === "forget" && r.ok) sel = null;
   cursor = 0; document.getElementById("log").textContent = "";
   refresh();
 }
@@ -261,7 +299,8 @@ async function refresh() {
     document.getElementById("actions").innerHTML =
       (run.approved ? `<span class="dim">approved &middot; </span>` :
         `<button onclick="post(${run.id},'approve')">approve writes</button>`) +
-      (stopped ? `<button onclick="post(${run.id},'resume')">resume</button>` : "");
+      (stopped ? `<button onclick="post(${run.id},'resume')">resume</button>` : "") +
+      `<button class="danger" onclick="post(${run.id},'forget',${JSON.stringify(run.set_name)})">delete run</button>`;
     const { events, cursor: c } = await (await fetch(`/api/runs/${sel}/events?after=${cursor}`)).json();
     cursor = c;
     if (events.length) {

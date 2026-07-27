@@ -26,7 +26,7 @@ from . import feedback
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
 from .ingest import Verdict, inspect
-from .model import RunStatus
+from .model import ProblemStage, RunStatus
 from .polygon import PolygonClient
 from .polygon_lane import PolygonLane
 from .scheduler import Scheduler
@@ -175,7 +175,8 @@ def build(cfg: dict, *, check: bool = True) -> tuple[Scheduler, Store]:
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     scheduler, store = build(cfg)
-    dashboard = Dashboard(store, host=cfg["dashboard_host"], port=cfg["dashboard_port"]).start()
+    dashboard = Dashboard(store, host=cfg["dashboard_host"], port=cfg["dashboard_port"],
+                          scheduler=scheduler).start()
 
     gate = "writes ENABLED" if cfg["apply"] else "preview only — approve runs in the dashboard"
     print(f"Maestro on http://{cfg['dashboard_host']}:{dashboard.port}  ({gate})", file=sys.stderr)
@@ -190,6 +191,25 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGTERM, bye)
     seen: set[str] = set()
+    cursors: dict[int, int] = {}
+
+    def tail(run_id: int) -> None:
+        """Echo whatever this run has logged since the last tick.
+
+        The event log is the only place a running stage says anything, and until
+        now it was only visible in the dashboard. An operator watching a terminal
+        saw nothing at all for the twenty minutes an upload takes — which is
+        indistinguishable from a hang, and is exactly how a healthy run gets
+        killed on suspicion of being stuck.
+        """
+        rows = store.events(run_id, after_id=cursors.get(run_id, 0), limit=200)
+        for r in rows:
+            cursors[run_id] = r["id"]
+            if r["level"] == "debug" and not args.verbose:
+                continue
+            mark = {"error": "[!]", "warn": " ! "}.get(r["level"], "   ")
+            where = f" {r['slug']}" if r["slug"] else ""
+            print(f"{mark} {run_id}{where}: {r['message']}", file=sys.stderr)
 
     def narrate(report) -> None:
         """Print what changed, once. A quiet loop is indistinguishable from a stuck one."""
@@ -207,11 +227,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"    {item}", file=sys.stderr)
         for err in report.errors:
             print(f"[!] {err}", file=sys.stderr)
+        for run in store.list_runs():
+            tail(run.id)
 
     try:
         scheduler.run_forever(max_ticks=args.max_ticks, on_tick=narrate)
     except KeyboardInterrupt:
-        print("\nstopping — waiting for any ElectiCode stage in flight…", file=sys.stderr)
+        print("\nstopping — waiting for any ElectiCode stage in flight. It runs in its "
+              "own process group, so this Ctrl-C did not reach it; it will finish or "
+              "time out on its own.", file=sys.stderr)
         scheduler.stop()
     finally:
         dashboard.stop()
@@ -228,10 +252,15 @@ def cmd_status(args: argparse.Namespace) -> int:
             print("no runs")
             return 0
         for r in runs:
-            note = r.block_reason or (r.error or "")
+            note = r.block_reason or r.error
+            if not note and (last := store.last_event(r.id)) is not None:
+                # A stage name has looked identical for twenty minutes whether
+                # the upload is progressing or wedged. The last thing it said is
+                # what tells them apart.
+                note = f"{last['at'][11:19]} {last['message']}"
             flag = "" if r.approved else "  [unapproved]"
             print(f"{r.id:>4}  {r.set_name:<32} {r.stage:<10} {r.status:<8} "
-                  f"{len(r.problems):>2}p{flag}  {str(note)[:60]}")
+                  f"{len(r.problems):>2}p{flag}  {str(note or '')[:70]}")
     # Non-zero when something wants a human, so a cron or a prompt can react.
     return 1 if any(r.status in (RunStatus.BLOCKED, RunStatus.FAILED) for r in runs) else 0
 
@@ -287,6 +316,58 @@ def cmd_inspect(args: argparse.Namespace) -> int:
             elif result.verdict is Verdict.INVALID:
                 worst = 2
     return worst
+
+
+def cmd_forget(args: argparse.Namespace) -> int:
+    """Delete Maestro's record of a run. Previews unless `--yes`.
+
+    The preview is not politeness. Deleting a run removes what Maestro knows and
+    nothing else: problems already imported to Polygon and rows already uploaded
+    to ElectiCode stay exactly where they are, and the set folder — still sitting
+    in the watch directory — becomes eligible for ingest again the moment the
+    name is free. Both of those are usually what the operator wants and neither
+    is guessable from the word "delete".
+    """
+    cfg = load_config(args.config)
+    with Store(cfg["db"]) as store:
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"no run {args.run_id}", file=sys.stderr)
+            return 1
+
+        uploaded = [p.slug for p in run.problems if p.electicode_slug
+                    or p.stage in (ProblemStage.UPLOADED, ProblemStage.RECONCILED,
+                                   ProblemStage.CHORED, ProblemStage.AUDITED)]
+        imported = [p.slug for p in run.problems if p.polygon_problem_id]
+
+        print(f"run {run.id}  {run.set_name}  {run.stage}/{run.status}  "
+              f"{len(run.problems)} problem(s)", file=sys.stderr)
+        print(f"  set folder: {run.set_dir}", file=sys.stderr)
+        if imported:
+            print(f"  [!] {len(imported)} problem(s) exist on Polygon and are NOT removed: "
+                  f"{', '.join(imported[:5])}{'…' if len(imported) > 5 else ''}", file=sys.stderr)
+        if uploaded:
+            print(f"  [!] {len(uploaded)} problem(s) are on ElectiCode and are NOT removed: "
+                  f"{', '.join(uploaded[:5])}{'…' if len(uploaded) > 5 else ''}", file=sys.stderr)
+        print(f"  after deleting, the folder is eligible for ingest again — move it out of "
+              f"{cfg['watch_dir']} first if you do not want the run to start over",
+              file=sys.stderr)
+
+        # RUNNING means a `maestro run` elsewhere may be mid-subprocess for this
+        # batch. Deleting under it leaves a browser writing to the platform for a
+        # run that no longer exists.
+        if run.status is RunStatus.RUNNING and not args.force:
+            print(f"\nrun {run.id} is RUNNING — stop `maestro run` first, or pass --force "
+                  f"if you are certain nothing is driving it", file=sys.stderr)
+            return 1
+        if not args.yes:
+            print(f"\nnothing deleted. Re-run with --yes to delete run {run.id}.",
+                  file=sys.stderr)
+            return 1
+
+        store.delete_run(run.id)
+    print(f"deleted run {run.id} ({run.set_name})", file=sys.stderr)
+    return 0
 
 
 def cmd_brief(args: argparse.Namespace) -> int:
@@ -360,11 +441,21 @@ def main(argv: list[str] | None = None) -> int:
     p_run = sub.add_parser("run", help="Start the scheduler and the dashboard.")
     p_run.add_argument("--max-ticks", type=int, default=None,
                        help="Stop after this many ticks (for a one-shot sweep).")
+    p_run.add_argument("-v", "--verbose", action="store_true",
+                       help="Echo every line the Scraper tools write, not just their "
+                            "own progress events.")
     p_run.set_defaults(func=cmd_run)
 
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
+    p_forget = sub.add_parser("forget", help="Delete Maestro's record of a run.")
+    p_forget.add_argument("run_id", type=int)
+    p_forget.add_argument("--yes", action="store_true", help="Actually delete it.")
+    p_forget.add_argument("--force", action="store_true",
+                          help="Delete even a RUNNING run. Stop `maestro run` first.")
+    p_forget.set_defaults(func=cmd_forget)
+
     p_brief = sub.add_parser("brief", help="Render the authoring brief for a new set.")
     p_brief.add_argument("name", help="The set name — `set.name` in the manifest.")
     p_brief.add_argument("--mix", required=True,

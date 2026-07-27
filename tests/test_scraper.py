@@ -2,7 +2,7 @@ import pytest
 
 from pathlib import Path
 
-from maestro.scraper import (Detected, Outcome, ScraperClient, _default_runner,
+from maestro.scraper import (Detected, Outcome, ScraperClient, run_streamed,
                              catalog, detected, events, interpret)
 
 
@@ -32,7 +32,7 @@ def test_an_undocumented_code_halts_rather_than_retrying():
 def _recorder(rc=0, stdout="", stderr=""):
     calls = []
 
-    def run(argv, timeout):
+    def run(argv, timeout, progress=None):
         calls.append(argv)
         return rc, stdout, stderr
 
@@ -77,7 +77,7 @@ def test_a_timeout_is_operational():
     """A hung browser must map to RETRY, not escape as an exception."""
     import sys
 
-    rc, _, err = _default_runner([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
+    rc, _, err = run_streamed([sys.executable, "-c", "import time; time.sleep(30)"], 0.5)
     assert interpret(rc)[0] is Outcome.RETRY
     assert "timed out" in err
 
@@ -146,7 +146,7 @@ USAGE_ERROR = (
 
 def test_an_argparse_rejection_halts_instead_of_retrying(tmp_path):
     """argparse also exits 2 — retrying an unknown subcommand is pure waste."""
-    def run(argv, timeout):
+    def run(argv, timeout, progress=None):
         return 2, "", USAGE_ERROR
 
     r = ScraperClient(tmp_path, tmp_path / "s.json", runner=run).session()
@@ -156,7 +156,7 @@ def test_an_argparse_rejection_halts_instead_of_retrying(tmp_path):
 
 
 def test_a_genuine_operational_failure_still_retries(tmp_path):
-    def run(argv, timeout):
+    def run(argv, timeout, progress=None):
         return 2, "", "Timed out waiting for the platform to detect problems.\n"
 
     r = ScraperClient(tmp_path, tmp_path / "s.json", runner=run).scrape(tmp_path / "c.json")
@@ -169,7 +169,7 @@ def test_a_genuine_operational_failure_still_retries(tmp_path):
     "tool.py: error: the following arguments are required: --char",
 ])
 def test_every_argparse_shape_is_recognised(tmp_path, line):
-    def run(argv, timeout):
+    def run(argv, timeout, progress=None):
         return 2, "", f"usage: tool.py …\n{line}\n"
 
     assert ScraperClient(tmp_path, tmp_path / "s.json",

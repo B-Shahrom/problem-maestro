@@ -49,7 +49,7 @@ class FakeScraper:
 
     # ------------------------------------------------------------------ hook
 
-    def __call__(self, argv: list[str], timeout: float):
+    def __call__(self, argv: list[str], timeout: float, progress=None):
         self.calls.append(argv)
         tool = Path(argv[1]).name
         return getattr(self, f"_{tool.removesuffix('.py')}")(argv)

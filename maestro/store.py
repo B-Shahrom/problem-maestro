@@ -255,6 +255,33 @@ class Store:
         with self._tx() as db:
             db.execute("UPDATE runs SET approved=1, updated_at=? WHERE id=?", (_now(), run_id))
 
+    def delete_run(self, run_id: int) -> Run | None:
+        """Forget a run entirely. Returns it as it was, or `None` if there was none.
+
+        The only destructive operation in the store, and it is deliberately
+        narrow: it removes Maestro's *record* of a batch and nothing else.
+        Problems already imported to Polygon and rows already uploaded to
+        ElectiCode are untouched — there is no undo for those, and a delete that
+        implied otherwise would be worse than no delete at all. Callers must say
+        so where an operator can read it.
+
+        What it does buy is a clean retry. `set_name` is UNIQUE and `inspect()`
+        returns ALREADY_INGESTED for a name it has seen, so a run that ended up
+        wedged permanently owns its set folder — the folder can sit in the watch
+        directory forever and never be looked at again. Removing the run releases
+        the name, and the next sweep ingests the folder from scratch.
+
+        Problems and events go with it: both declare `ON DELETE CASCADE` and the
+        connection enables foreign keys, so this is one statement rather than
+        three that could half-succeed.
+        """
+        run = self.get_run(run_id)
+        if run is None:
+            return None
+        with self._tx() as db:
+            db.execute("DELETE FROM runs WHERE id=?", (run_id,))
+        return run
+
     def block(self, run_id: int, reason: BlockReason, message: str) -> None:
         """Park a run for a human.
 
@@ -407,6 +434,18 @@ class Store:
                 (run_id, slug, level, message, _now()),
             )
         return int(cur.lastrowid)
+
+    def last_event(self, run_id: int) -> sqlite3.Row | None:
+        """The most recent thing this run said.
+
+        For a run that is neither blocked nor failed there is otherwise nothing
+        to show but its stage, and a stage has looked the same for twenty minutes
+        whether the upload is progressing or wedged.
+        """
+        with self._read() as db:
+            return db.execute(
+                "SELECT * FROM events WHERE run_id=? ORDER BY id DESC LIMIT 1", (run_id,)
+            ).fetchone()
 
     def events(self, run_id: int, after_id: int = 0, limit: int = 500) -> list[sqlite3.Row]:
         """Cursor-based tail, so the dashboard can poll without re-reading."""

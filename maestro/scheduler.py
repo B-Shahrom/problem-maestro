@@ -99,7 +99,15 @@ class TickReport:
 
     @property
     def idle(self) -> bool:
-        return not (self.ingested or self.advanced or self.electicode is not None)
+        """Nothing is happening — the loop may sleep long.
+
+        A busy ElectiCode worker counts as *not* idle even though this tick moved
+        nothing itself. It is the longest-running thing in the system, it emits
+        progress the whole time, and calling it idle would mean an operator
+        watching the console hears from a live upload once every thirty seconds.
+        """
+        return not (self.ingested or self.advanced
+                    or self.electicode is not None or self.electicode_busy)
 
 
 class Scheduler:
@@ -130,6 +138,7 @@ class Scheduler:
         purpose: a restart re-arms the grace period, which is the right
         direction to be wrong in — it delays a report, never files a false one."""
         self._worker: threading.Thread | None = None
+        self._worker_run: int | None = None
         self._results: queue.SimpleQueue = queue.SimpleQueue()
         self._stop = threading.Event()
 
@@ -237,6 +246,7 @@ class Scheduler:
 
         run_id = waiting[0]
         report.electicode = run_id
+        self._worker_run = run_id
         self._worker = threading.Thread(
             target=self._run_electicode, args=(run_id,),
             name=f"electicode-{run_id}", daemon=True,
@@ -280,6 +290,8 @@ class Scheduler:
                 error = f"{run_id}: {r.failed}"
         except Exception as e:  # noqa: BLE001
             error = self._crash(run_id, "electicode", e)
+        finally:
+            self._worker_run = None
         self._results.put((advanced, error))
 
     def _crash(self, run_id: int, where: str, e: Exception) -> str:
@@ -332,6 +344,16 @@ class Scheduler:
     @property
     def busy(self) -> bool:
         return self._worker is not None and self._worker.is_alive()
+
+    @property
+    def current_electicode(self) -> int | None:
+        """The run the ElectiCode worker is driving right now, if any.
+
+        Exists so a destructive action can refuse. Deleting a run while a
+        subprocess is still uploading on its behalf leaves the browser writing to
+        the platform for a batch Maestro no longer has any record of.
+        """
+        return self._worker_run if self.busy else None
 
 
 def build(

@@ -85,12 +85,20 @@ python -m maestro check                # validate paths AND that the Scraper che
 python -m maestro inspect              # what Maestro makes of each folder in watch_dir
 python -m maestro inspect --report     # …and write a correction request beside each rejection
 python -m maestro run                  # scheduler + dashboard on :8787
+python -m maestro run -v               # …echoing every line the Scraper tools write
 python -m maestro status               # one-shot listing; non-zero if a run wants a human
+python -m maestro forget 12 --yes      # delete Maestro's record of run 12
 ```
 
 `apply` is **off** by default, so a fresh install previews and parks each run at its first
 write. Approve individual runs in the dashboard, or set `apply: true` once you trust it.
 `config.json` is gitignored — it points at the session file and the Middleman.
+
+A stage that drives a browser reports as it goes: each of the Scraper's own progress events
+becomes a line in the run log, and a tool that has gone quiet for 90 seconds says so rather
+than looking identical to one that is working. The Scraper runs in its own process group, so
+Ctrl-C on Maestro no longer kills the browser mid-upload — and a process that *is* killed is
+reported as killed rather than as a tool that failed.
 
 ## Code
 
@@ -106,13 +114,13 @@ write. Approve individual runs in the dashboard, or set `apply: true` once you t
 | `maestro/feedback.py` | The author's half of a rejection: every check paired with the contract clause it enforces, and an explicit list of the checks that never ran |
 | `maestro/polygon.py` | Middleman client plus the decision policy layered over its error taxonomy |
 | `maestro/polygon_lane.py` | Stages 3–5: one job per problem, quarantine on verify failure, extract into the upload parent |
-| `maestro/scraper.py` | The Scraper's CLIs as a typed surface: exit codes carry the decision, nothing mutates without `apply=True` |
+| `maestro/scraper.py` | The Scraper's CLIs as a typed surface: output streams out live, exit codes carry the decision, a killed process is told apart from a failed one, and nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
 | `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
-| `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only two mutations in the system: approve a run's writes, resume a stopped one |
+| `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only three mutations in the system: approve a run's writes, resume a stopped one, delete one |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 334 tests, no external services required.
+`python -m pytest` — 376 tests, no external services required.
 
 Two of the test modules talk to the other repos' real code when a checkout is present, and
 skip otherwise (`MAESTRO_SCRAPER_REPO`, `MAESTRO_MIDDLEMAN_REPO`). They exist because most of

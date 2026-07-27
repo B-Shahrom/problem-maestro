@@ -30,6 +30,7 @@ one invocation. The lane splits the characteristics file instead.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,13 +40,104 @@ from .checks import Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
                     RunStatus)
 from .preflight import divisions_landed, limits_landed
-from .scraper import Detected, Outcome, Result, ScraperClient
+from .scraper import Detected, Outcome, Progress, Result, ScraperClient
 from .store import Store
 
 #: Tries at a stage whose failure the Scraper called operational. Low on purpose:
 #: these stages drive a browser, and a fault that survives three attempts is a
 #: platform or session problem that another attempt will not fix.
 RETRY_CAP = 3
+
+#: Lines from one tool invocation that reach the event log before it stops
+#: relaying them. Playwright can be very loud on stderr, and an event table that
+#: is 95% browser warnings is one nobody reads — but truncating silently would
+#: reproduce the failure this whole change is about, so the cut is announced.
+LOG_CAP = 300
+
+
+class Reporter:
+    """Relays a running tool's output into the run's event log, as it happens.
+
+    Before this, a stage that took twenty minutes wrote nothing until it
+    finished. "Something is stuck uploading" was therefore not a hard question —
+    it was an unanswerable one, because the only observation available was that
+    no result had appeared yet, which is identical to working normally.
+
+    Three kinds of line arrive and they are not equally interesting:
+
+    * the tool's own `--json` events, which are the actual progress and are
+      reformatted to one readable line each;
+    * `heartbeat`, which is Maestro noticing silence. This is the one that
+      answers the question, so it is logged at `warn` — it is the difference
+      between "slow" and "not responding";
+    * everything else, which is browser noise, kept at `debug` and capped.
+    """
+
+    def __init__(self, store: Store, run_id: int, label: str) -> None:
+        self.store = store
+        self.run_id = run_id
+        self.label = label
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, p: Progress) -> None:
+        with self._lock:
+            self._n += 1
+            n = self._n
+        if n > LOG_CAP:
+            if n == LOG_CAP + 1:
+                self.store.log(self.run_id, "warn",
+                               f"{self.label}: further output suppressed after "
+                               f"{LOG_CAP} lines — the full stream is still captured "
+                               f"and reported when the stage ends")
+            return
+
+        if p.stream == "heartbeat":
+            self.store.log(self.run_id, "warn", f"{self.label}: {p.line}")
+            return
+        if (pretty := _event_line(p.line)) is not None:
+            self.store.log(self.run_id, "info", f"{self.label}: {pretty}")
+            return
+        self.store.log(self.run_id, "debug" if p.stream == "stdout" else "warn",
+                       f"{self.label}: {p.line[:300]}")
+
+
+def _event_line(line: str) -> str | None:
+    """One `--json` event as a sentence, or `None` if this is not one.
+
+    The tools emit NDJSON on stdout: `{"event": "start", "total": N}` then one
+    `item` per unit of work. Rendering them rather than dumping the raw JSON is
+    what makes the log answer "where is it" at a glance.
+    """
+    line = line.strip()
+    if not line.startswith("{"):
+        return None
+    try:
+        e = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(e, dict) or "event" not in e:
+        return None
+
+    kind = e.get("event")
+    if kind == "start":
+        total = e.get("total")
+        warns = e.get("warnings") or []
+        head = f"starting — {total} step(s)" if total is not None else "starting"
+        return head + (f"; {len(warns)} warning(s): {warns[0]}" if warns else "")
+    if kind == "item":
+        what = (e.get("id") or "?").strip()
+        if "ok" in e:
+            mark = "ok" if e.get("ok") else "FAILED"
+            detail = f" — {e['error']}" if not e.get("ok") and e.get("error") else ""
+            return f"{what}: {mark}{detail}"
+        # The upload modal's detection rows carry `exists` instead of `ok`.
+        if "exists" in e:
+            return f"detected {what} ({'exists' if e.get('exists') else 'new'})"
+        return f"{what}"
+    if kind in ("end", "done", "summary"):
+        return f"{kind}: " + ", ".join(f"{k}={v}" for k, v in e.items() if k != "event")
+    return f"{kind}: " + ", ".join(f"{k}={v}" for k, v in e.items() if k != "event")
 
 
 @dataclass(slots=True)
@@ -224,6 +316,14 @@ class ElectiCodeLane:
         """Must match `PolygonLane.upload_dir` — this is the handoff between halves."""
         return self.run_dir(run_id) / "upload"
 
+    def _say(self, run_id: int, label: str) -> Reporter:
+        """A live relay from one tool invocation into this run's event log.
+
+        One per call rather than one per lane: the cap is per invocation, so a
+        loud upload cannot use up the budget a later chore chain needs.
+        """
+        return Reporter(self.store, run_id, label)
+
     def artefact(self, run_id: int, name: str) -> Path:
         """Everything a stage produced, kept per run so a failure is inspectable."""
         d = self.run_dir(run_id) / "electicode"
@@ -322,7 +422,7 @@ class ElectiCodeLane:
         return True
 
     def _session_ok(self, run_id: int, report: LaneReport) -> bool:
-        r = self.client.session()
+        r = self.client.session(progress=self._say(run_id, "session"))
         report.ran.append("session")
         if r.ok:
             return True
@@ -342,7 +442,8 @@ class ElectiCodeLane:
             self._fail(run_id, report, f"nothing to upload: {folder} does not exist")
             return
 
-        preview = self.client.upload(folder, self.artefact(run_id, "upload-preview.json"))
+        preview = self.client.upload(folder, self.artefact(run_id, "upload-preview.json"),
+                                     progress=self._say(run_id, "upload preview"))
         report.ran.append("upload:preview")
         if not preview.ok:
             self._setback(run_id, preview, report, "upload preview")
@@ -368,7 +469,8 @@ class ElectiCodeLane:
                                        existed_before_upload=by_id[p.slug].exists)
 
         applied = self.client.upload(folder, self.artefact(run_id, "upload.json"),
-                                     apply=True, only=[p.slug for p in problems])
+                                     apply=True, only=[p.slug for p in problems],
+                                     progress=self._say(run_id, "upload"))
         report.ran.append("upload:apply")
         if not applied.ok:
             self._setback(run_id, applied, report, "upload")
@@ -421,7 +523,8 @@ class ElectiCodeLane:
     # ---------------------------------------------------------- stage 6.5
 
     def _reconcile(self, run_id: int, report: LaneReport) -> None:
-        r = self.client.scrape(self.artefact(run_id, "catalog.json"))
+        r = self.client.scrape(self.artefact(run_id, "catalog.json"),
+                               progress=self._say(run_id, "catalog scrape"))
         report.ran.append("scrape")
         if not r.ok:
             self._setback(run_id, r, report, "catalog scrape")
@@ -492,6 +595,7 @@ class ElectiCodeLane:
                 divisions=self.divisions, targets=self.targets,
                 list_url=self.list_url, fixmdx=self.fixmdx,
                 skip=",".join(done),
+                progress=self._say(run_id, f"chores/{group.name}"),
             )
             report.ran.append(f"chores:{group.name}")
             if not r.ok:
@@ -530,7 +634,8 @@ class ElectiCodeLane:
     def _audit(self, run_id: int, report: LaneReport) -> None:
         run = self.store.get_run(run_id)
         assert run is not None
-        scrape = self.client.scrape(self.artefact(run_id, "catalog-after.json"))
+        scrape = self.client.scrape(self.artefact(run_id, "catalog-after.json"),
+                                    progress=self._say(run_id, "catalog scrape"))
         report.ran.append("scrape")
         if not scrape.ok:
             self._setback(run_id, scrape, report, "post-chore scrape")
@@ -555,7 +660,8 @@ class ElectiCodeLane:
 
         r = self.client.audit(self.artefact(run_id, "catalog-after.json"), path,
                               self.artefact(run_id, "audit.json"),
-                              divisions=self.divisions)
+                              divisions=self.divisions,
+                              progress=self._say(run_id, "audit"))
         report.ran.append("audit")
         if r.outcome is Outcome.HALT and r.rc == 1:
             # `report.py audit` exits 1 on a gap or a mismatch. That is a finding
