@@ -255,15 +255,30 @@ PAGE = """<!doctype html>
   <div id="log"></div>
 </div>
 <script>
-let sel = null, cursor = 0;
+let sel = null, cursor = 0, runs = [];
 
-const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-async function post(id, action, name) {
+// Every click is delegated from `data-act`, and nothing but a run id is ever
+// written into markup. The delete button originally interpolated the set name
+// into an `onclick=""` attribute: `JSON.stringify` emits double quotes, which
+// closed the attribute on themselves, so the button rendered and its handler
+// did not parse. Passing data through attributes at all is the bug; this
+// removes the possibility rather than escaping around it.
+document.addEventListener("click", ev => {
+  const el = ev.target.closest("[data-act]");
+  if (!el) return;
+  const id = Number(el.dataset.id);
+  if (el.dataset.act === "select") select(id); else post(id, el.dataset.act);
+});
+
+async function post(id, action) {
+  const run = runs.find(r => r.id === id);
   // The one destructive action asks first, and names what it cannot undo. The
   // record goes; anything already on Polygon or ElectiCode stays.
   if (action === "forget" && !confirm(
-      `Delete run ${id} (${name}) from Maestro?\n\n` +
+      `Delete run ${id} (${run ? run.set_name : "?"}) from Maestro?\n\n` +
       `This removes Maestro's record only. Problems already imported to Polygon ` +
       `or uploaded to ElectiCode are NOT removed.\n\n` +
       `The set folder becomes eligible for ingest again, so leaving it in the ` +
@@ -272,9 +287,9 @@ async function post(id, action, name) {
   const r = await fetch(`/api/runs/${id}/${action}`, {
     method: "POST", headers: { "X-Maestro": "1" },
   });
-  if (!r.ok) document.getElementById("err").textContent = (await r.json()).error;
-  else document.getElementById("err").textContent = "";
-  if (action === "forget" && r.ok) sel = null;
+  const err = document.getElementById("err");
+  if (!r.ok) { err.textContent = (await r.json()).error; }
+  else { err.textContent = ""; if (action === "forget") sel = null; }
   cursor = 0; document.getElementById("log").textContent = "";
   refresh();
 }
@@ -282,9 +297,9 @@ async function post(id, action, name) {
 function select(id) { sel = id; cursor = 0; document.getElementById("log").textContent = ""; refresh(); }
 
 async function refresh() {
-  const { runs } = await (await fetch("/api/runs")).json();
+  runs = (await (await fetch("/api/runs")).json()).runs;
   document.getElementById("runs").innerHTML = runs.map(r => `
-    <tr onclick="select(${r.id})" class="${r.id === sel ? "sel" : ""}">
+    <tr data-act="select" data-id="${r.id}" class="${r.id === sel ? "sel" : ""}">
       <td>${r.id}</td><td>${esc(r.set_name)}</td><td>${esc(r.stage)}</td>
       <td><span class="pill ${esc(r.status)}">${esc(r.status)}</span></td>
       <td>${r.problems}</td>
@@ -298,9 +313,9 @@ async function refresh() {
     const stopped = run.status === "blocked" || run.status === "failed";
     document.getElementById("actions").innerHTML =
       (run.approved ? `<span class="dim">approved &middot; </span>` :
-        `<button onclick="post(${run.id},'approve')">approve writes</button>`) +
-      (stopped ? `<button onclick="post(${run.id},'resume')">resume</button>` : "") +
-      `<button class="danger" onclick="post(${run.id},'forget',${JSON.stringify(run.set_name)})">delete run</button>`;
+        `<button data-act="approve" data-id="${run.id}">approve writes</button>`) +
+      (stopped ? `<button data-act="resume" data-id="${run.id}">resume</button>` : "") +
+      `<button class="danger" data-act="forget" data-id="${run.id}">delete run</button>`;
     const { events, cursor: c } = await (await fetch(`/api/runs/${sel}/events?after=${cursor}`)).json();
     cursor = c;
     if (events.length) {

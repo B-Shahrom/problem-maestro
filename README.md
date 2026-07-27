@@ -120,12 +120,16 @@ reported as killed rather than as a tool that failed.
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only three mutations in the system: approve a run's writes, resume a stopped one, delete one |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 376 tests, no external services required.
+`python -m pytest` — 380 tests, no external services required.
 
-Two of the test modules talk to the other repos' real code when a checkout is present, and
-skip otherwise (`MAESTRO_SCRAPER_REPO`, `MAESTRO_MIDDLEMAN_REPO`). They exist because most of
-Maestro's risk is not in its own logic but in its *model* of the other two systems, and a
-test that only checks Maestro against itself cannot see that model drifting:
+Three of the test modules check Maestro against something outside itself, and skip when it is
+absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of
+the systems around it, and a test that only checks Maestro against itself cannot see that model
+drifting — the dashboard's delete button once shipped inert with every server-side test green:
+
+- `test_dashboard_browser.py` — the page driven by a real Chromium: the buttons are clicked,
+  not inspected. Needs `pip install playwright`; it uses an already-installed browser and
+  never downloads one
 
 - `test_characteristics_roundtrip.py` — the characteristics Maestro renders, parsed back by
   the real `batch.py`, down to the positional tag alignment and the flag that protects

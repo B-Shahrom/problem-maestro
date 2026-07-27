@@ -321,3 +321,56 @@ def test_a_timeout_never_signals_maestro_s_own_process_group(monkeypatch):
     rc, _, err = run_streamed([PY, "-c", "import time; time.sleep(60)"], 0.5)
     assert "timed out" in err  # we are still alive to assert it
     assert rc == 2
+
+
+# ------------------------------------------------------------- the actual page
+
+
+def test_no_data_is_ever_written_into_an_html_attribute():
+    """The bug that shipped: the delete button did nothing.
+
+    `JSON.stringify(run.set_name)` was interpolated into `onclick="..."`. It
+    emits double quotes, so the attribute closed on itself — the button rendered
+    perfectly and its handler did not parse. The endpoint test passed the whole
+    time, because the endpoint was never the problem.
+
+    The fix is structural, so the check is too: handlers are delegated from
+    `data-act`, and an `onclick` anywhere in the page means someone has started
+    putting values back into markup.
+    """
+    import re
+
+    from maestro.dashboard import PAGE
+
+    # Prose about the bug is allowed; markup that reintroduces it is not.
+    code = re.sub(r"^\s*//.*$", "", PAGE, flags=re.M)
+    assert not re.search(r"\bon[a-z]+\s*=", code), (
+        "inline handlers are how a set name closed an attribute and killed the "
+        "button; bind from data-act instead")
+
+
+def test_every_action_the_page_offers_is_one_the_server_accepts():
+    """A button naming an action the router rejects is a button that does nothing."""
+    import re
+
+    from maestro.dashboard import PAGE
+
+    offered = set(re.findall(r'data-act="([a-z]+)"', PAGE))
+    assert offered == {"select", "approve", "resume", "forget"}
+    # `select` is client-side; the rest are POST routes.
+    assert offered - {"select"} == {"approve", "resume", "forget"}
+
+
+def test_the_delete_button_is_rendered_for_a_selected_run():
+    from maestro.dashboard import PAGE
+
+    assert 'data-act="forget"' in PAGE
+    assert "delete run" in PAGE
+
+
+def test_the_page_escapes_quotes_too():
+    """It did not before — which is what let a value break out of an attribute."""
+    from maestro.dashboard import PAGE
+
+    esc = next(l for l in PAGE.splitlines() if "const esc" in l)
+    assert '"' in esc.split("replace")[1][:20] or "&quot;" in PAGE
