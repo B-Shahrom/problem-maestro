@@ -16,9 +16,9 @@ deliberately refuses to make for itself:
 * **forget** deletes the run. The only destructive action here, and the only one
   that is not reversible — see `Store.delete_run` for what it does and, more
   importantly, what it does not undo.
-* **divisions** picks which divisions this batch is granted to. A per-batch
-  choice rather than a per-install one, because that is what it actually is —
-  see `maestro.divisions`.
+* **settings** picks this batch's division access, translation targets and
+  contest list. Per-batch rather than per-install, because that is what they
+  actually are — see `maestro.settings`.
 
 None of them retries anything by itself. Clearing the status only makes the run
 eligible for the next tick, and the lane's own idempotency rules still decide
@@ -33,7 +33,7 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import divisions as div
+from . import settings as cfg
 from .model import RunStage, RunStatus
 from .store import Store
 
@@ -78,10 +78,13 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not parts:
                 return self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
-            if parts == ["api", "divisions"]:
-                # The vocabulary, served rather than duplicated in the page, so
-                # the checklist and the validator can never list different names.
-                return self._send(200, {"divisions": list(div.DIVISIONS)})
+            if parts == ["api", "settings"]:
+                # The vocabularies, served rather than duplicated in the page, so
+                # a checklist and its validator can never list different values.
+                return self._send(200, {"fields": [
+                    {"key": f.key, "label": f.label, "help": f.help,
+                     "vocabulary": list(f.vocabulary) if f.vocabulary else None}
+                    for f in cfg.FIELDS.values()]})
             if parts == ["api", "runs"]:
                 return self._send(200, {"runs": [self._summary(r)
                                                  for r in self._store.list_runs()]})
@@ -106,7 +109,7 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "bad run id"})
         action = parts[3]
-        if action not in ("approve", "resume", "forget", "divisions"):
+        if action not in ("approve", "resume", "forget", "settings", "divisions"):
             return self._send(404, {"error": f"unknown action {action!r}"})
 
         run = self._store.get_run(run_id)
@@ -114,8 +117,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": f"no run {run_id}"})
         if action == "forget":
             return self._forget(run)
-        if action == "divisions":
-            return self._divisions(run)
+        if action in ("settings", "divisions"):
+            return self._settings(run)
         getattr(self, f"_{action}")(run)
         self._send(200, {"run": self._summary(self._store.get_run(run_id))})
 
@@ -129,48 +132,59 @@ class _Handler(BaseHTTPRequestHandler):
             # do anything, and the operator has already said what they want.
             self._resume(run)
 
-    def _divisions(self, run) -> None:
-        """Set this batch's division access from a ticked list.
+    def _settings(self, run) -> None:
+        """Set this batch's own choices from the page's controls.
 
-        Validated against the closed vocabulary here rather than left to the
-        Scraper. `division set` does reject an unknown name — with exit `1`, at
-        the *end* of the chore chain, after `fixmdx` and `metadata` have already
-        run and been paid for. Catching it at the moment of choosing costs one
+        Only the keys present in the body are touched, so one control saving does
+        not clear the others. A `null` value restores the configured default; an
+        empty list or string is a *choice* of none and must not collapse into it.
+
+        Vocabularies are validated here rather than left to the tools. `division
+        set` and `translate` both reject an unknown value — with exit `1`, at the
+        *end* of the chore chain, after `fixmdx` and `metadata` have already run
+        and been paid for. Catching it at the moment of choosing costs one
         comparison.
-
-        Sent after the chores have run, it is accepted and recorded but says so:
-        the grant already happened (or did not), and changing the number now
-        changes only what the audit will look for.
         """
         try:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._send(400, {"error": "expected a JSON body"})
+        if not isinstance(body, dict):
+            return self._send(400, {"error": "expected a JSON object"})
+        if unknown_keys := sorted(set(body) - set(cfg.FIELDS)):
+            return self._send(400, {"error": f"not a per-batch setting: "
+                                             f"{', '.join(unknown_keys)}"})
 
-        raw = body.get("divisions")
-        if raw is None:
-            # Explicit null restores the configured default; an empty list does
-            # not. They are different requests and must not collapse.
-            self._store.set_divisions(run.id, None)
-            self._store.log(run.id, "info", "divisions: cleared — the configured default applies")
-            return self._send(200, {"run": self._summary(self._store.get_run(run.id))})
+        changed: list[str] = []
+        for key, raw in body.items():
+            field = cfg.FIELDS[key]
+            if raw is None:
+                self._store.set_setting(run.id, key, None)
+                changed.append(f"{field.label}: cleared, the configured default applies")
+                continue
+            if field.is_list:
+                if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+                    return self._send(400, {"error": f"{key} must be a list of names, or null"})
+                values, unknown = cfg.normalise(key, ", ".join(raw))
+                if unknown:
+                    return self._send(400, {
+                        "error": f"unknown {field.label}: {', '.join(unknown)}. "
+                                 f"Valid: {', '.join(field.vocabulary)}"})
+            else:
+                if not isinstance(raw, str):
+                    return self._send(400, {"error": f"{key} must be a string, or null"})
+                values, _ = cfg.normalise(key, raw)
+            spec = cfg.render(key, values)
+            self._store.set_setting(run.id, key, spec)
+            changed.append(f"{field.label}: {cfg.describe(key, spec)}")
 
-        if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
-            return self._send(400, {"error": "divisions must be a list of names, or null"})
-        names, unknown = div.normalise(", ".join(raw))
-        if unknown:
-            return self._send(400, {"error": f"unknown division(s): {', '.join(unknown)}. "
-                                             f"Valid: {', '.join(div.DIVISIONS)}"})
-
-        spec = div.render(names)
-        self._store.set_divisions(run.id, spec)
         note = ""
-        if run.stage in (RunStage.AUDIT, RunStage.DONE):
+        if changed and run.stage in (RunStage.AUDIT, RunStage.DONE):
             note = (" — but the chores have already run, so this changes only what the "
-                    "audit checks for, not what was granted")
-        self._store.log(run.id, "info",
-                        f"divisions: {div.describe(spec)}{note}")
+                    "audit checks for, not what was applied")
+        for line in changed:
+            self._store.log(run.id, "info", f"{line}{note}")
         self._send(200, {"run": self._summary(self._store.get_run(run.id)), "note": note})
 
     def _forget(self, run) -> None:
@@ -227,9 +241,9 @@ class _Handler(BaseHTTPRequestHandler):
             "block_reason": str(run.block_reason) if run.block_reason else None,
             "error": run.error,
             "approved": run.approved,
-            "divisions": run.divisions,
-            "divisions_label": div.describe(run.divisions),
-            "divisions_locked": run.stage in (RunStage.AUDIT, RunStage.DONE),
+            "settings": {k: getattr(run, k) for k in cfg.FIELDS},
+            "settings_label": {k: cfg.describe(k, getattr(run, k)) for k in cfg.FIELDS},
+            "settings_locked": run.stage in (RunStage.AUDIT, RunStage.DONE),
             "problems": len(run.problems),
             "by_status": by_status,
             "updated_at": run.updated_at,
@@ -297,10 +311,12 @@ PAGE = """<!doctype html>
   button { font: inherit; padding: .2rem .7rem; margin-right: .4rem; cursor: pointer; }
   button.danger { color: #d33; float: right; margin-right: 0; }
   #divs { margin-top: .7rem; }
+  #divs .field { margin-bottom: .7rem; }
   #divs label { display: inline-block; margin-right: .9rem; white-space: nowrap; cursor: pointer; }
-  #divs input { vertical-align: -1px; margin-right: .25rem; }
+  #divs input[type=checkbox] { vertical-align: -1px; margin-right: .25rem; }
+  #divs input[type=text] { font: inherit; padding: .15rem .3rem; }
   #divs .head { color: var(--dim); margin-bottom: .3rem; }
-  #divs.locked label { opacity: .55; cursor: default; }
+  #divs input:disabled + span, #divs :disabled { opacity: .55; }
   .debug { color: var(--dim); }
   #log { white-space: pre-wrap; max-height: 22rem; overflow-y: auto; border: 1px solid var(--line);
          padding: .6rem; margin-top: .8rem; }
@@ -318,7 +334,7 @@ PAGE = """<!doctype html>
   <div id="log"></div>
 </div>
 <script>
-let sel = null, cursor = 0, runs = [], DIVISIONS = [];
+let sel = null, cursor = 0, runs = [], FIELDS = [];
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -335,20 +351,23 @@ document.addEventListener("click", ev => {
   const id = Number(el.dataset.id);
   const act = el.dataset.act;
   if (act === "select") select(id);
-  else if (act === "save-divisions") saveDivisions(id);
-  else if (act === "reset-divisions") resetDivisions(id);
+  else if (act === "save") saveSetting(id, el.dataset.key);
+  else if (act === "reset") resetSetting(id, el.dataset.key);
   else post(id, act);
 });
 
-async function saveDivisions(id) {
-  // Ticked boxes only — an empty list is a real answer ("grant nothing"), which
-  // is why it is sent as [] rather than omitted. `null` is a separate request
+async function saveSetting(id, key) {
+  const f = FIELDS.find(f => f.key === key);
+  // An empty list or string is a real answer ("apply nothing here"), which is
+  // why it is sent as [] / "" rather than omitted. `null` is a separate request
   // that restores the configured default.
-  const picked = [...document.querySelectorAll("#divs input:checked")].map(b => b.value);
-  await send(id, "divisions", { divisions: picked });
+  const value = f.vocabulary
+    ? [...document.querySelectorAll(`[data-field='${key}'] input:checked`)].map(b => b.value)
+    : (document.querySelector(`[data-field='${key}'] input[type=text]`).value || "");
+  await send(id, "settings", { [key]: value });
 }
 
-async function resetDivisions(id) { await send(id, "divisions", { divisions: null }); }
+async function resetSetting(id, key) { await send(id, "settings", { [key]: null }); }
 
 async function send(id, action, body) {
   const r = await fetch(`/api/runs/${id}/${action}`, {
@@ -384,7 +403,7 @@ async function post(id, action) {
 function select(id) { sel = id; cursor = 0; document.getElementById("log").textContent = ""; refresh(); }
 
 async function refresh() {
-  if (!DIVISIONS.length) DIVISIONS = (await (await fetch("/api/divisions")).json()).divisions;
+  if (!FIELDS.length) FIELDS = (await (await fetch("/api/settings")).json()).fields;
   runs = (await (await fetch("/api/runs")).json()).runs;
   document.getElementById("runs").innerHTML = runs.map(r => `
     <tr data-act="select" data-id="${r.id}" class="${r.id === sel ? "sel" : ""}">
@@ -404,26 +423,33 @@ async function refresh() {
         `<button data-act="approve" data-id="${run.id}">approve writes</button>`) +
       (stopped ? `<button data-act="resume" data-id="${run.id}">resume</button>` : "") +
       `<button class="danger" data-act="forget" data-id="${run.id}">delete run</button>`;
-    // Re-rendered only when the selection or the stored value changes, so a
+    // Re-rendered only when the selection or a stored value changes, so a
     // half-ticked checklist is not wiped by the three-second poll underneath it.
-    const stamp = `${run.id}:${run.divisions}:${run.divisions_locked}`;
+    const stamp = `${run.id}:${JSON.stringify(run.settings)}:${run.settings_locked}`;
     const box = document.getElementById("divs");
     if (box.dataset.stamp !== stamp) {
       box.dataset.stamp = stamp;
-      box.className = run.divisions_locked ? "locked" : "";
-      const on = new Set((run.divisions ?? "").split(",").map(s => s.trim()).filter(Boolean));
-      const dis = run.divisions_locked ? " disabled" : "";
-      box.innerHTML =
-        `<div class="head">division access &middot; ${esc(run.divisions_label)}` +
-        (run.divisions_locked ? " &middot; chores already ran" : "") + `</div>` +
-        DIVISIONS.map(d =>
-          `<label><input type="checkbox" value="${esc(d)}"${on.has(d) ? " checked" : ""}${dis}>` +
-          `${esc(d)}</label>`).join("") +
-        (run.divisions_locked ? "" :
-          `<div style="margin-top:.5rem">` +
-          `<button data-act="save-divisions" data-id="${run.id}">save divisions</button>` +
-          `<button data-act="reset-divisions" data-id="${run.id}">use config default</button>` +
-          `</div>`);
+      const dis = run.settings_locked ? " disabled" : "";
+      box.innerHTML = FIELDS.map(f => {
+        const cur = run.settings[f.key];
+        const control = f.vocabulary
+          ? f.vocabulary.map(v => {
+              const on = (cur ?? "").split(",").map(s => s.trim()).includes(v);
+              return `<label><input type="checkbox" value="${esc(v)}"` +
+                     `${on ? " checked" : ""}${dis}>${esc(v)}</label>`;
+            }).join("")
+          : `<input type="text" size="52" value="${esc(cur ?? "")}"${dis} ` +
+            `placeholder="Contest Manage / lesson Edit URL">`;
+        return `<div class="field" data-field="${f.key}">` +
+          `<div class="head" title="${esc(f.help)}">${esc(f.label)} &middot; ` +
+          `${esc(run.settings_label[f.key])}</div>${control}` +
+          (run.settings_locked ? "" :
+            ` <button data-act="save" data-key="${f.key}" data-id="${run.id}">save</button>` +
+            `<button data-act="reset" data-key="${f.key}" data-id="${run.id}">default</button>`) +
+          `</div>`;
+      }).join("") + (run.settings_locked
+        ? `<div class="head">chores already ran — these now change only what the audit checks</div>`
+        : "");
     }
 
     const { events, cursor: c } = await (await fetch(`/api/runs/${sel}/events?after=${cursor}`)).json();

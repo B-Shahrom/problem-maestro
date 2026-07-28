@@ -35,8 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import characteristics as char
-from . import divisions as div
 from . import manifest
+from . import settings as cfg
 from .checks import Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
                     RunStatus)
@@ -317,14 +317,18 @@ class ElectiCodeLane:
         """Must match `PolygonLane.upload_dir` — this is the handoff between halves."""
         return self.run_dir(run_id) / "upload"
 
-    def divisions_for(self, run) -> str:
-        """The divisions this batch asks for.
+    def setting_for(self, run, key: str) -> str:
+        """One of this batch's own choices, falling back to the install's default.
 
         The run's own choice wins, and `""` is a choice: an operator who unticked
         everything asked for none, not for whatever the install happens to be
-        configured with. Only `None` — never chosen — inherits the default.
+        configured with. Only `None` — never chosen — inherits.
         """
-        return self.divisions if run.divisions is None else run.divisions
+        return cfg.effective(key, getattr(run, key), getattr(self, key))
+
+    def divisions_for(self, run) -> str:
+        """The most-asked of the three, by name."""
+        return self.setting_for(run, "divisions")
 
     def _needs_paged_scrape(self, run) -> bool:
         """Whether stage 8 has to page the table instead of reading the catalog.
@@ -625,8 +629,9 @@ class ElectiCodeLane:
             done = self._stages_done(run_id, group)
             r = self.client.chores(
                 path, tags_mode=group.tags_mode, apply=True,
-                divisions=self.divisions_for(run), targets=self.targets,
-                list_url=self.list_url, fixmdx=self.fixmdx,
+                divisions=self.setting_for(run, "divisions"),
+                targets=self.setting_for(run, "targets"),
+                list_url=self.setting_for(run, "list_url"), fixmdx=self.fixmdx,
                 skip=",".join(done),
                 progress=self._say(run_id, f"chores/{group.name}"),
             )

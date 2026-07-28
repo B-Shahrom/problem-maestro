@@ -22,8 +22,8 @@ import sys
 from pathlib import Path
 
 from . import brief as brief_mod
-from . import divisions as div
 from . import feedback
+from . import settings as batch_cfg
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
 from .ingest import Verdict, inspect
@@ -127,7 +127,11 @@ def check_warnings(cfg: dict) -> list[str]:
                    "the default — pick per batch in the dashboard, or with "
                    "`maestro divisions <run>`.")
     if not cfg["targets"]:
-        out.append("`targets` is empty — no statement translation will run.")
+        out.append("`targets` is empty — no statement translation will run unless a batch "
+                   "chooses its own (`maestro settings <run> --targets ru,tg,uz`).")
+    if not cfg["list_url"]:
+        out.append("`list_url` is empty — problems are added to no contest list unless a "
+                   "batch chooses one (`maestro settings <run> --list-url …`).")
     return out
 
 
@@ -360,47 +364,72 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return worst
 
 
-def cmd_divisions(args: argparse.Namespace) -> int:
-    """Show or set one batch's division access. The dashboard's checklist, over ssh.
+def cmd_settings(args: argparse.Namespace) -> int:
+    """Show or set one batch's own choices. The dashboard's controls, over ssh.
 
-    With no `--set`, it lists the nine names with the run's current selection
-    marked — which is also the answer to "what can I even pick", since the
-    vocabulary is closed and lives in the Scraper.
+    With no flags it prints all three with the current selection marked — which
+    is also the answer to "what can I even pick", since two of the three are
+    closed vocabularies that live in the Scraper.
     """
-    cfg = load_config(args.config)
-    with Store(cfg["db"]) as store:
+    conf = load_config(args.config)
+    with Store(conf["db"]) as store:
         run = store.get_run(args.run_id)
         if run is None:
             print(f"no run {args.run_id}", file=sys.stderr)
             return 1
 
-        if args.default:
-            store.set_divisions(run.id, None)
-            print(f"run {run.id}: cleared — the configured default "
-                  f"({div.describe(cfg['divisions']) })  applies", file=sys.stderr)
-            return 0
-
-        if args.set is not None:
-            names, unknown = div.normalise(args.set)
-            if unknown:
-                print(f"unknown division(s): {', '.join(unknown)}\n"
-                      f"valid: {', '.join(div.DIVISIONS)}", file=sys.stderr)
+        given = {k: getattr(args, k) for k in batch_cfg.FIELDS}
+        wanted = {k: v for k, v in given.items() if v is not None}
+        for key in args.default or []:
+            if key not in batch_cfg.FIELDS:
+                print(f"not a per-batch setting: {key}\n"
+                      f"valid: {', '.join(batch_cfg.FIELDS)}", file=sys.stderr)
                 return 1
-            spec = div.render(names)
-            store.set_divisions(run.id, spec)
-            store.log(run.id, "info", f"divisions: {div.describe(spec)}")
-            print(f"run {run.id}: {div.describe(spec)}", file=sys.stderr)
-            if run.stage in (RunStage.AUDIT, RunStage.DONE):
-                print("  [!] the chores have already run — this changes only what the "
-                      "audit checks for, not what was granted", file=sys.stderr)
+            store.set_setting(run.id, key, None)
+            print(f"run {run.id}: {batch_cfg.FIELDS[key].label} cleared — the configured "
+                  f"default applies", file=sys.stderr)
+
+        for key, raw in wanted.items():
+            values, unknown = batch_cfg.normalise(key, raw)
+            if unknown:
+                field = batch_cfg.FIELDS[key]
+                print(f"unknown {field.label}: {', '.join(unknown)}\n"
+                      f"valid: {', '.join(field.vocabulary or ())}", file=sys.stderr)
+                return 1
+            spec = batch_cfg.render(key, values)
+            store.set_setting(run.id, key, spec)
+            store.log(run.id, "info",
+                      f"{batch_cfg.FIELDS[key].label}: {batch_cfg.describe(key, spec)}")
+            print(f"run {run.id}: {batch_cfg.FIELDS[key].label} — "
+                  f"{batch_cfg.describe(key, spec)}", file=sys.stderr)
+
+        if (wanted or args.default) and run.stage in (RunStage.AUDIT, RunStage.DONE):
+            print("  [!] the chores have already run — this changes only what the audit "
+                  "checks for, not what was applied", file=sys.stderr)
+        if wanted or args.default:
             return 0
 
-        effective = cfg["divisions"] if run.divisions is None else run.divisions
-        on = set(div.split(effective))
-        print(f"run {run.id}  {run.set_name}  {div.describe(run.divisions)}", file=sys.stderr)
-        for name in div.DIVISIONS:
-            print(f"  [{'x' if name in on else ' '}] {name}", file=sys.stderr)
+        run = store.get_run(run.id)
+        print(f"run {run.id}  {run.set_name}", file=sys.stderr)
+        for key, field in batch_cfg.FIELDS.items():
+            chosen = getattr(run, key)
+            live = batch_cfg.effective(key, chosen, conf[key])
+            print(f"\n  {field.label}  —  {batch_cfg.describe(key, chosen)}", file=sys.stderr)
+            if field.vocabulary is None:
+                print(f"    {live or '(none)'}", file=sys.stderr)
+                continue
+            on = {v.lower() for v in batch_cfg.split(live)}
+            for name in field.vocabulary:
+                print(f"    [{'x' if name.lower() in on else ' '}] {name}", file=sys.stderr)
     return 0
+
+
+def cmd_divisions(args: argparse.Namespace) -> int:
+    """`settings --divisions`, kept because it is the one touched every batch."""
+    args.targets = args.list_url = None
+    args.divisions = args.set
+    args.default = ["divisions"] if args.default else []
+    return cmd_settings(args)
 
 
 def cmd_forget(args: argparse.Namespace) -> int:
@@ -536,6 +565,15 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
+    p_set = sub.add_parser("settings", help="Show or set one batch's own choices.")
+    p_set.add_argument("run_id", type=int)
+    p_set.add_argument("--divisions", help="Comma-separated division names, or '' for none.")
+    p_set.add_argument("--targets", help="Comma-separated language codes, or '' for none.")
+    p_set.add_argument("--list-url", dest="list_url", help="Contest Manage URL, or '' for none.")
+    p_set.add_argument("--default", action="append", metavar="KEY",
+                       help="Clear one setting so the configured default applies. Repeatable.")
+    p_set.set_defaults(func=cmd_settings)
+
     p_div = sub.add_parser("divisions", help="Show or set one batch's division access.")
     p_div.add_argument("run_id", type=int)
     p_div.add_argument("--set", help="Comma-separated names, or '' for none. "

@@ -128,11 +128,13 @@ class Run:
     error: str | None = None
 
     divisions: str | None = None
-    """Division access this batch asks for — see `maestro.divisions`.
+    targets: str | None = None
+    list_url: str | None = None
+    """What this batch chose for itself — see `maestro.settings`.
 
     `None` means never chosen, so the configured default applies. `""` means
     chosen and deliberately empty, which must NOT fall back: an operator who
-    unticked everything asked for no divisions, not for the default.
+    unticked everything asked for none, not for the default.
     """
 
     approved: bool = False

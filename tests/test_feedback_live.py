@@ -326,6 +326,10 @@ def test_a_timeout_never_signals_maestro_s_own_process_group(monkeypatch):
 # ------------------------------------------------------------- the actual page
 
 
+PAGE_SOURCE = (Path(__file__).resolve().parent.parent / "maestro" / "dashboard.py"
+               ).read_text(encoding="utf-8")
+
+
 def test_no_data_is_ever_written_into_an_html_attribute():
     """The bug that shipped: the delete button did nothing.
 
@@ -349,16 +353,25 @@ def test_no_data_is_ever_written_into_an_html_attribute():
         "button; bind from data-act instead")
 
 
-def test_every_action_the_page_offers_is_one_the_server_accepts():
-    """A button naming an action the router rejects is a button that does nothing."""
+def test_every_action_the_page_routes_is_one_the_server_accepts():
+    """A button naming an action the router rejects is a button that does nothing.
+
+    Three `data-act` values are handled in the page and never reach the network
+    (`select` picks a run, `save`/`reset` marshal a settings body). Everything
+    else is passed straight to `post()` as a route name, so it has to exist.
+    """
     import re
 
     from maestro.dashboard import PAGE
 
-    offered = set(re.findall(r'data-act="([a-z]+)"', PAGE))
-    assert offered == {"select", "approve", "resume", "forget"}
-    # `select` is client-side; the rest are POST routes.
-    assert offered - {"select"} == {"approve", "resume", "forget"}
+    CLIENT_SIDE = {"select", "save", "reset"}
+    offered = set(re.findall(r'data-act="([a-z-]+)"', PAGE))
+    assert CLIENT_SIDE <= offered, "the page stopped offering a control it handles itself"
+
+    # `send(id, "settings", …)` is the one route not named by a data-act.
+    routed = (offered - CLIENT_SIDE) | set(re.findall(r'send\(id, "([a-z]+)"', PAGE))
+    accepted = set(re.findall(r'action not in \(([^)]*)\)', PAGE_SOURCE)[0].replace('"', "").split(", "))
+    assert routed <= accepted, f"the page offers {routed - accepted}, which the router rejects"
 
 
 def test_the_delete_button_is_rendered_for_a_selected_run():

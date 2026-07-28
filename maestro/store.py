@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS runs (
     error        TEXT,
     approved     INTEGER NOT NULL DEFAULT 0,
     divisions    TEXT,
+    targets      TEXT,
+    list_url     TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -75,6 +77,11 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_problems_run   ON problems(run_id, stage, status);
 CREATE INDEX IF NOT EXISTS idx_events_run     ON events(run_id, id);
 """
+
+#: Per-batch overrides — see `maestro.settings`. Named here as well because the
+#: migration and `set_setting` both reach a column, and a column name that came
+#: from a request body must be checked against a fixed set rather than trusted.
+SETTING_COLUMNS = ("divisions", "targets", "list_url")
 
 # Stages a problem passes through per-problem (the Polygon half). Beyond SHAPED
 # the batch drives it, so per-problem readiness is only meaningful up to here.
@@ -129,11 +136,12 @@ class Store:
         have = {r["name"] for r in self._db.execute("PRAGMA table_info(runs)")}
         if "approved" not in have:
             self._db.execute("ALTER TABLE runs ADD COLUMN approved INTEGER NOT NULL DEFAULT 0")
-        if "divisions" not in have:
-            # Nullable on purpose. NULL is "never chosen, inherit the config";
-            # an empty string is "chosen, none". Collapsing the two would make
-            # every pre-existing run silently adopt whatever the config says.
-            self._db.execute("ALTER TABLE runs ADD COLUMN divisions TEXT")
+        for column in SETTING_COLUMNS:
+            if column not in have:
+                # Nullable on purpose. NULL is "never chosen, inherit the config";
+                # an empty string is "chosen, none". Collapsing the two would make
+                # every pre-existing run silently adopt whatever the config says.
+                self._db.execute(f"ALTER TABLE runs ADD COLUMN {column} TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -210,6 +218,8 @@ class Store:
             block_reason=BlockReason(row["block_reason"]) if row["block_reason"] else None,
             error=row["error"],
             divisions=row["divisions"],
+            targets=row["targets"],
+            list_url=row["list_url"],
             approved=bool(row["approved"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -247,16 +257,22 @@ class Store:
         with self._tx() as db:
             db.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
 
-    def set_divisions(self, run_id: int, spec: str | None) -> None:
-        """Record which divisions this batch asks for. `None` restores the default.
+    def set_setting(self, run_id: int, key: str, spec: str | None) -> None:
+        """Record one of this batch's own choices. `None` restores the default.
 
         Separate from `set_run` because it is an operator's decision rather than
         a state transition, and because `None` here means something — "inherit
         the config" — that `set_run`'s omit-to-leave-unchanged convention cannot
         express.
+
+        The key is checked against a fixed set rather than interpolated blind:
+        it reaches a column name, and the caller is an HTTP handler.
         """
+        if key not in SETTING_COLUMNS:
+            raise KeyError(f"{key!r} is not a per-batch setting; "
+                           f"expected one of {', '.join(sorted(SETTING_COLUMNS))}")
         with self._tx() as db:
-            db.execute("UPDATE runs SET divisions=?, updated_at=? WHERE id=?",
+            db.execute(f"UPDATE runs SET {key}=?, updated_at=? WHERE id=?",
                        (spec, _now(), run_id))
 
     def approve(self, run_id: int) -> None:

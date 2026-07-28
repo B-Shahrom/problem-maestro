@@ -144,16 +144,17 @@ def test_the_division_checklist_is_rendered_and_saves(page, live):
 
     store, run_id, url = live
     _open(page, url)
-    page.wait_for_selector("#divs input")
+    page.wait_for_selector("[data-field=divisions] input")
 
-    labels = page.eval_on_selector_all("#divs input", "els => els.map(e => e.value)")
+    labels = page.eval_on_selector_all(
+        "[data-field=divisions] input", "els => els.map(e => e.value)")
     assert labels == list(div.DIVISIONS)
 
-    page.check("#divs input[value='Electi']")
-    page.check("#divs input[value='Division A+']")
-    page.click("[data-act='save-divisions']")
+    page.check("[data-field=divisions] input[value='Electi']")
+    page.check("[data-field=divisions] input[value='Division A+']")
+    page.click("[data-field=divisions] [data-act='save']")
     page.wait_for_function(
-        "document.querySelector('#divs .head').textContent.includes('Division A+')",
+        "document.querySelector('[data-field=divisions] .head').textContent.includes('Division A+')",
         timeout=10_000)
 
     assert store.get_run(run_id).divisions == "Electi, Division A+"
@@ -162,13 +163,13 @@ def test_the_division_checklist_is_rendered_and_saves(page, live):
 
 def test_the_checklist_reloads_ticked_and_can_be_cleared(page, live):
     store, run_id, url = live
-    store.set_divisions(run_id, "Tier 1")
+    store.set_setting(run_id, "divisions", "Tier 1")
     _open(page, url)
-    page.wait_for_selector("#divs input[value='Tier 1']:checked")
+    page.wait_for_selector("[data-field=divisions] input[value='Tier 1']:checked")
 
-    page.click("[data-act='reset-divisions']")
+    page.click("[data-field=divisions] [data-act='reset']")
     page.wait_for_function(
-        "document.querySelector('#divs .head').textContent.includes('configured default')",
+        "document.querySelector('[data-field=divisions] .head').textContent.includes('configured default')",
         timeout=10_000)
     assert store.get_run(run_id).divisions is None
     assert page.errors == []
@@ -179,8 +180,55 @@ def test_a_poll_does_not_wipe_a_half_ticked_checklist(page, live):
     hands would silently discard boxes they had just ticked."""
     _, _, url = live
     _open(page, url)
-    page.wait_for_selector("#divs input")
-    page.check("#divs input[value='Division C']")
+    page.wait_for_selector("[data-field=divisions] input")
+    page.check("[data-field=divisions] input[value='Division C']")
 
     page.wait_for_timeout(3500)   # at least one full poll
-    assert page.is_checked("#divs input[value='Division C']")
+    assert page.is_checked("[data-field=divisions] input[value='Division C']")
+
+
+def test_all_three_batch_settings_are_rendered(page, live):
+    """Two checklists and a text field, from the vocabularies the server serves."""
+    from maestro import divisions as div
+    from maestro import settings as cfg
+
+    _, _, url = live
+    _open(page, url)
+    page.wait_for_selector("[data-field=list_url] input[type=text]")
+
+    assert page.eval_on_selector_all(
+        "[data-field=divisions] input", "els => els.map(e => e.value)") == list(div.DIVISIONS)
+    assert page.eval_on_selector_all(
+        "[data-field=targets] input", "els => els.map(e => e.value)") == list(cfg.LANGUAGES)
+    assert page.locator("[data-field=list_url] input[type=text]").count() == 1
+
+
+def test_the_contest_url_saves_as_typed(page, live):
+    store, run_id, url = live
+    _open(page, url)
+    page.fill("[data-field=list_url] input[type=text]", "https://www.electicode.com/c/9/manage")
+    page.click("[data-field=list_url] [data-act='save']")
+    page.wait_for_function(
+        "document.querySelector('[data-field=list_url] .head').textContent.includes('/c/9/manage')",
+        timeout=10_000)
+    assert store.get_run(run_id).list_url == "https://www.electicode.com/c/9/manage"
+    assert page.errors == []
+
+
+def test_saving_one_setting_leaves_the_others_alone(page, live):
+    """Each field saves on its own; a partial body must not clear the rest."""
+    store, run_id, url = live
+    store.set_setting(run_id, "divisions", "Electi")
+    _open(page, url)
+    page.wait_for_selector("[data-field=targets] input")
+
+    page.check("[data-field=targets] input[value='ru']")
+    page.click("[data-field=targets] [data-act='save']")
+    page.wait_for_function(
+        "document.querySelector('[data-field=targets] .head').textContent.includes('ru')",
+        timeout=10_000)
+
+    run = store.get_run(run_id)
+    assert run.targets == "ru"
+    assert run.divisions == "Electi", "saving targets cleared the divisions"
+    assert page.errors == []
