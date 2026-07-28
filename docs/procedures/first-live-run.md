@@ -43,6 +43,11 @@ Then edit `config.json`. The three that matter:
 | `scraper_state` | path to `session_state.json` |
 | `watch_dir` | the folder you drop *set folders* into (see below) |
 
+`divisions`, `targets` and `list_url` are **defaults only**. Division access is picked per
+batch — nine tick-boxes on the run in the dashboard, or `maestro divisions <run> --set "…"`.
+Leaving the config default empty is fine; a batch that never chooses simply gets none, and
+`maestro check` says so at startup.
+
 **Leave `apply` as `false`.** That is the whole point of the first run: every stage that would
 write parks and waits for you.
 
@@ -55,6 +60,10 @@ python -m maestro check
 It validates every path, names each problem, and tells you how many set folders it can see.
 A wrong `scraper_repo` would otherwise surface minutes into a run as a subprocess failing to
 open a file.
+
+It also refuses to start against a Scraper checkout older than the contract Maestro was built
+against. The first live run hit exactly that — `contest_scraper.py session` did not exist yet,
+so the session check failed three times and the run stopped. `git -C <scraper> pull` first.
 
 ## 2 · Ingest only — prove the gate works before trusting it
 
@@ -124,6 +133,19 @@ telling you a real thing — someone else's problem occupies that slug.
 After the upload, stage 6.5 reads the catalog back and refuses to continue unless every slug
 landed.
 
+### Watching it
+
+`python -m maestro run` echoes each stage's own progress as it happens — one line per
+`--json` event from the Scraper, plus a warning if a tool has gone quiet for 90 seconds.
+Add `-v` to see every line the tools write, not just their progress events.
+
+A stage that reports nothing for minutes is the normal shape of a `batch run`; a stage
+that has *stopped reporting* now says so. Those are different, and until the first live
+run they looked identical from outside.
+
+**Ctrl-C is safe.** The Scraper runs in its own process group, so interrupting Maestro no
+longer kills the browser mid-upload — the in-flight stage finishes or times out on its own.
+
 ## 5 · Chores, and the one thing to look at
 
 The chore stage splits the batch by `exists` and runs `batch.py` once per group. Check the two
@@ -139,7 +161,7 @@ run is the only cheap chance to confirm it end to end.
 
 ## 6 · The audit gate
 
-Stage 8 scrapes the catalog and compares it against the characteristics. Two outcomes:
+Stage 8 scrapes the catalog and compares it against the characteristics. Three outcomes:
 
 - **clean** → the run goes to `done`. That is the whole pipeline proven.
 - **gaps** → the run parks as `blocked`, and the log names the slug and both values.
@@ -147,9 +169,20 @@ Stage 8 scrapes the catalog and compares it against the characteristics. Two out
 A gap here is not a Maestro failure — it is the gate doing its job. Read `audit.json` under
 `runs/<id>/electicode/` before changing anything.
 
+- **incomplete** → the run parks as `blocked` because the audit passed but did not run every
+  check it was asked for. `report audit --char` exits `0` when it *skips* the division check,
+  which it must do on a catalog-sourced scrape — so exit 0 means "nothing it looked at was
+  wrong", not "the batch is correct". Maestro reads the tool's own `checks_run`/`skipped`
+  rather than the exit code alone.
+
 Maestro also checks the limits separately, twice: at import against what the Middleman applied,
-and here against what the platform shows. Neither is visible anywhere else, because ElectiCode
-renders TL/ML read-only.
+and here against what the platform shows. Neither is visible anywhere else, because nothing in
+the pipeline can set TL/ML after import — the platform has a way, but no Scraper command
+exposes it yet, so a wrong limit needs a corrected re-import.
+
+**The catalog scrape is one page load, not forty.** Reconcile always reads the flight-payload
+catalog; the audit pages the table only when the batch actually granted divisions, because the
+catalog carries no `division_access`.
 
 ---
 
@@ -162,6 +195,11 @@ Every stop is deliberate and every one is legible in the dashboard.
 | `blocked / session_expired` | the ElectiCode session died mid-run | log in on the host, then **resume** |
 | `blocked / awaiting_approval` | a write stage, or the audit found gaps | read the log, then **approve** or fix the set |
 | `failed` | something the lane could not fold into a status | the error names it; **resume** after fixing |
+
+A run that is wedged past saving can be removed entirely — the **delete run** button, or
+`maestro forget <id> --yes`. It frees the set name so the folder in `watch_dir` is ingested
+again from scratch. It removes Maestro's record only: anything already on Polygon or
+ElectiCode stays exactly where it is.
 
 **Resume never retries anything by itself.** It makes the run eligible for the next tick, and
 the idempotency rules still apply — a chore chain resumes at the stage that failed, and a stage

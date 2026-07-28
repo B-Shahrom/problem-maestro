@@ -122,9 +122,10 @@ def check_warnings(cfg: dict) -> list[str]:
         # The division grant is the one chore stage that vanishes silently when
         # unset: it is simply absent from `batch run`'s plan, so the log shows a
         # clean two-step chain and nothing anywhere says a step was dropped.
-        out.append("`divisions` is empty — no division access will be granted, and the "
-                   "division step will not appear in the chore plan at all. Set it to the "
-                   "division name(s) if the problems should be visible to one.")
+        out.append("`divisions` is empty, so a batch that does not choose its own gets no "
+                   "division access and no division step in its chore plan. This is only "
+                   "the default — pick per batch in the dashboard, or with "
+                   "`maestro divisions <run>`.")
     if not cfg["targets"]:
         out.append("`targets` is empty — no statement translation will run.")
     return out
@@ -296,8 +297,12 @@ def cmd_status(args: argparse.Namespace) -> int:
                 # what tells them apart.
                 note = f"{last['at'][11:19]} {last['message']}"
             flag = "" if r.approved else "  [unapproved]"
+            # Divisions print only when this run chose something of its own —
+            # a column repeating the config on every row is noise, but a batch
+            # that departs from it is exactly what an operator wants to see.
+            chose = f"  div={div.describe(r.divisions)}" if r.divisions is not None else ""
             print(f"{r.id:>4}  {r.set_name:<32} {r.stage:<10} {r.status:<8} "
-                  f"{len(r.problems):>2}p{flag}  {str(note or '')[:70]}")
+                  f"{len(r.problems):>2}p{flag}{chose}  {str(note or '')[:70]}")
     # Non-zero when something wants a human, so a cron or a prompt can react.
     return 1 if any(r.status in (RunStatus.BLOCKED, RunStatus.FAILED) for r in runs) else 0
 
