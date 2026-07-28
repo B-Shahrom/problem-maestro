@@ -109,6 +109,26 @@ def check_paths(cfg: dict) -> list[str]:
     return problems
 
 
+def check_warnings(cfg: dict) -> list[str]:
+    """Config that is legal but probably not what was meant.
+
+    Kept apart from `check_paths` because these must **not** stop a run —
+    `build` refuses to start on anything that returns from there, and a batch
+    with no divisions is a perfectly ordinary batch.
+    """
+    out: list[str] = []
+    if not cfg["divisions"]:
+        # The division grant is the one chore stage that vanishes silently when
+        # unset: it is simply absent from `batch run`'s plan, so the log shows a
+        # clean two-step chain and nothing anywhere says a step was dropped.
+        out.append("`divisions` is empty — no division access will be granted, and the "
+                   "division step will not appear in the chore plan at all. Set it to the "
+                   "division name(s) if the problems should be visible to one.")
+    if not cfg["targets"]:
+        out.append("`targets` is empty — no statement translation will run.")
+    return out
+
+
 #: What Maestro invokes, and the Phase 2 item that added it. Checked because a
 #: checkout that predates one of these fails *mid-run* with argparse's own error,
 #: minutes in and several stages from anything the operator configured.
@@ -126,7 +146,8 @@ REQUIRED_CAPABILITIES: dict[str, list[tuple[str, str, str]]] = {
     "problem_uploader.py": [("the `upload` subcommand", "Phase 1", r'add_parser\(\s*"upload"'),
                             ("`upload --only`", "priority 8", r'"--only"'),
                             ("`upload --json`", "priority 6", r'"--json"')],
-    "problem_scraper.py": [("the `problems` subcommand", "Phase 1", r'add_parser\(\s*"problems"')],
+    "problem_scraper.py": [("the `problems` subcommand", "Phase 1", r'add_parser\(\s*"problems"'),
+                           ("`problems --from-catalog`", "T2", r'"--from-catalog"')],
     "batch.py": [("the `run` subcommand", "Phase 1", r'add_parser\(\s*"run"'),
                  ("`run --tags-mode`", "Phase 1", r'"--tags-mode"'),
                  ("`run --skip`", "priority 8", r'"--skip"'),
@@ -180,6 +201,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     gate = "writes ENABLED" if cfg["apply"] else "preview only — approve runs in the dashboard"
     print(f"Maestro on http://{cfg['dashboard_host']}:{dashboard.port}  ({gate})", file=sys.stderr)
+    for w in check_warnings(cfg):
+        print(f"  ! {w}", file=sys.stderr)
     if cfg["watch_dir"]:
         print(f"Watching {cfg['watch_dir']}", file=sys.stderr)
 
@@ -201,8 +224,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         saw nothing at all for the twenty minutes an upload takes — which is
         indistinguishable from a hang, and is exactly how a healthy run gets
         killed on suspicion of being stuck.
+
+        A run seen for the first time starts at the *end* of its log, not the
+        beginning. The log is durable, so replaying it would reprint every
+        historical line on every start — which is worse than noise: a failure
+        that was diagnosed and fixed weeks ago reappears looking like it just
+        happened, and the operator debugs it again.
         """
-        rows = store.events(run_id, after_id=cursors.get(run_id, 0), limit=200)
+        if run_id not in cursors:
+            last = store.last_event(run_id)
+            cursors[run_id] = last["id"] if last is not None else 0
+            if cursors[run_id]:
+                print(f"    {run_id}: resuming — {cursors[run_id]} earlier event(s) not "
+                      f"shown, see the dashboard", file=sys.stderr)
+            return
+        rows = store.events(run_id, after_id=cursors[run_id], limit=200)
         for r in rows:
             cursors[run_id] = r["id"]
             if r["level"] == "debug" and not args.verbose:
@@ -417,6 +453,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     gate = "writes ENABLED" if cfg["apply"] else "preview only"
     print(f"config OK — {gate}, dashboard on "
           f"{cfg['dashboard_host']}:{cfg['dashboard_port']}", file=sys.stderr)
+    for w in check_warnings(cfg):
+        print(f"  ! {w}", file=sys.stderr)
     if cfg["watch_dir"]:
         sets = sorted(p.name for p in Path(cfg["watch_dir"]).iterdir() if p.is_dir())
         print(f"watching {cfg['watch_dir']} — {len(sets)} set folder(s): "

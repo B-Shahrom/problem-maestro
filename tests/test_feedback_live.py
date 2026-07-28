@@ -374,3 +374,65 @@ def test_the_page_escapes_quotes_too():
 
     esc = next(l for l in PAGE.splitlines() if "const esc" in l)
     assert '"' in esc.split("replace")[1][:20] or "&quot;" in PAGE
+
+
+# --------------------------------------------------- not scraping 41 pages
+
+
+def _lane(tmp_path, divisions=""):
+    from maestro.electicode_lane import ElectiCodeLane
+    from maestro.scraper import ScraperClient
+
+    calls: list[list[str]] = []
+
+    def runner(argv, timeout, progress=None):
+        calls.append(argv)
+        return 0, "", ""
+
+    store = Store(tmp_path / "m.db")
+    client = ScraperClient(tmp_path / "repo", tmp_path / "s.json", runner=runner)
+    return ElectiCodeLane(store, client, tmp_path / "runs", divisions=divisions), calls, store
+
+
+def test_reconcile_reads_the_catalog_in_one_page_load(tmp_path):
+    """It only asks whether a slug exists, which the catalog answers."""
+    lane, calls, store = _lane(tmp_path)
+    try:
+        lane.client.scrape(tmp_path / "c.json", from_catalog=True)
+        assert "--from-catalog" in calls[0]
+    finally:
+        store.close()
+
+
+def test_the_audit_pages_the_table_only_when_divisions_are_at_stake(tmp_path):
+    """The catalog carries no `division_access`, so a run that granted some has
+    to page. A run that granted none gains nothing from 41 page loads."""
+    with_div, _, s1 = _lane(tmp_path / "a", divisions="Electi")
+    without, _, s2 = _lane(tmp_path / "b")
+    try:
+        assert with_div._needs_paged_scrape() is True
+        assert without._needs_paged_scrape() is False
+    finally:
+        s1.close()
+        s2.close()
+
+
+def test_report_py_is_not_sent_a_state_it_cannot_parse(tmp_path):
+    """`report.py` has no session — argparse matched the path against `command`
+    and stage 8 could never succeed."""
+    lane, calls, store = _lane(tmp_path)
+    try:
+        lane.client.audit(tmp_path / "s.json", tmp_path / "c.md", tmp_path / "o.json")
+        assert "--state" not in calls[0], calls[0]
+        assert calls[0][2] == "audit", "the subcommand must come first for report.py"
+    finally:
+        store.close()
+
+
+def test_the_browser_tools_still_get_their_state(tmp_path):
+    lane, calls, store = _lane(tmp_path)
+    try:
+        lane.client.scrape(tmp_path / "c.json")
+        assert calls[0][2:4] == ["--state", str(tmp_path / "s.json")]
+    finally:
+        store.close()

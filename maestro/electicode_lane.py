@@ -316,6 +316,27 @@ class ElectiCodeLane:
         """Must match `PolygonLane.upload_dir` — this is the handoff between halves."""
         return self.run_dir(run_id) / "upload"
 
+    def _needs_paged_scrape(self) -> bool:
+        """Whether stage 8 has to page the table instead of reading the catalog.
+
+        The catalog is one page load against ~40, so the paged scrape is worth
+        avoiding — but it is not a strictly better source. It carries a subset of
+        the columns, and `division_access` is not among them.
+
+        Difficulty and category, which are what the chores set, *are* in the
+        catalog. So the answer turns on one thing: whether this run granted
+        division access and therefore has a division claim to verify. If it did
+        not, there is nothing the paged scrape would add and forty page loads buy
+        nothing.
+
+        Getting this wrong in the cheap direction is the dangerous one — a
+        catalog-sourced scrape has no `division_access` on any row, which is
+        indistinguishable from every problem having been granted none. `report
+        audit --char` skips its division check in exactly that state, so a run
+        that silently used the catalog would pass an audit that never looked.
+        """
+        return bool(self.divisions)
+
     def _say(self, run_id: int, label: str) -> Reporter:
         """A live relay from one tool invocation into this run's event log.
 
@@ -523,8 +544,10 @@ class ElectiCodeLane:
     # ---------------------------------------------------------- stage 6.5
 
     def _reconcile(self, run_id: int, report: LaneReport) -> None:
-        r = self.client.scrape(self.artefact(run_id, "catalog.json"),
-                               progress=self._say(run_id, "catalog scrape"))
+        # Reconcile only asks "does this slug exist on the platform" — a question
+        # the one-page catalog answers as well as forty pages of table do.
+        r = self.client.scrape(self.artefact(run_id, "catalog.json"), from_catalog=True,
+                               progress=self._say(run_id, "catalog scrape (1 page load)"))
         report.ran.append("scrape")
         if not r.ok:
             self._setback(run_id, r, report, "catalog scrape")
@@ -634,8 +657,11 @@ class ElectiCodeLane:
     def _audit(self, run_id: int, report: LaneReport) -> None:
         run = self.store.get_run(run_id)
         assert run is not None
+        paged = self._needs_paged_scrape()
         scrape = self.client.scrape(self.artefact(run_id, "catalog-after.json"),
-                                    progress=self._say(run_id, "catalog scrape"))
+                                    from_catalog=not paged,
+                                    progress=self._say(run_id, "catalog scrape"
+                                                       + ("" if paged else " (1 page load)")))
         report.ran.append("scrape")
         if not scrape.ok:
             self._setback(run_id, scrape, report, "post-chore scrape")

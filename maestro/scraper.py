@@ -375,6 +375,22 @@ def run_streamed(argv: list[str], timeout: float,
     return p.returncode, "\n".join(out), "\n".join(err)
 
 
+#: The tools that accept `--state` on their parent parser — i.e. everything that
+#: drives a browser. `report.py` does **not**: it is a pure file-to-file
+#: transform over an existing scrape, so it has no session to load and its parser
+#: has no such option.
+#:
+#: Sending it anyway is not a harmless extra. argparse consumes the flag it does
+#: not know, then matches the *path* against the `command` positional and reports
+#: `invalid choice: 'C:\\...\\session_state.json' (choose from 'audit')` — which
+#: reads exactly like a stale checkout, and is what stage 8 failed with for every
+#: run until this was found.
+STATEFUL_TOOLS = frozenset({
+    "problem_uploader.py", "problem_scraper.py", "contest_scraper.py",
+    "batch.py", "problem_editor.py",
+})
+
+
 class ScraperClient:
     """One method per Scraper invocation Maestro needs.
 
@@ -405,7 +421,8 @@ class ScraperClient:
     def _run(self, tool: str, sub: str, *args: str,
              session: bool = False, timeout: float | None = None,
              progress: OnLine | None = None) -> Result:
-        argv = [self.python, str(self.repo / tool), "--state", str(self.state), sub, *args]
+        state = ["--state", str(self.state)] if tool in STATEFUL_TOOLS else []
+        argv = [self.python, str(self.repo / tool), *state, sub, *args]
         rc, out, err = self._run_argv(argv, timeout or self.timeout, progress)
         outcome, reason = interpret(rc, session=session)
         if outcome is Outcome.RETRY and (usage := _usage_error(err)):
@@ -469,15 +486,28 @@ class ScraperClient:
     # ---------------------------------------------------------------- audit
 
     def scrape(self, output: str | Path, *, strict: bool = True,
-               progress: OnLine | None = None) -> Result:
+               from_catalog: bool = False, progress: OnLine | None = None) -> Result:
         """The catalog read behind both stage 6.5 and stage 8.
 
         `--strict` on purpose: a paging failure that returns 40 of 2,000 problems
         would otherwise exit 0, and every slug Maestro just uploaded would look
         absent. A short scrape must fail loudly rather than read as a mismatch.
+
+        `from_catalog` reads the flight payload in **one page load** instead of
+        paging the table ~40×, which is the difference between seconds and
+        minutes on a 2,000-problem platform. It is not a free win: the catalog
+        carries a subset of the columns, and `division_access` is not among them.
+        So it is the caller's decision, made per stage from what that stage
+        actually reads — see `ElectiCodeLane._needs_paged_scrape`.
+
+        The tool falls back to the paged scrape by itself if the catalog cannot
+        be read, and marks its output `source` either way, so a caller can tell
+        which it got rather than assuming.
         """
         args = ["--base", self.base, "--format", "json",
                 "--output", str(Path(output).resolve())]
+        if from_catalog:
+            args.append("--from-catalog")
         if strict:
             args.append("--strict")
         r = self._run("problem_scraper.py", "problems", *args, progress=progress)

@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from maestro.__main__ import DEFAULTS, build, load_config, main
+from maestro.__main__ import (DEFAULTS, build, check_paths, check_warnings,
+                              load_config, main)
 from maestro.model import BlockReason, ProblemSeed
 from maestro.store import Store
 
@@ -21,7 +22,7 @@ def _scraper(tmp_path, name="scraper", *, capable=True):
         "contest_scraper.py": ['sub.add_parser(\n        "session", help="…")'],
         "problem_uploader.py": ['sub.add_parser("upload")', 'pu.add_argument("--only")',
                                 'pu.add_argument("--json", action="store_true")'],
-        "problem_scraper.py": ['sub.add_parser("problems")'],
+        "problem_scraper.py": ['sub.add_parser("problems")', 'ps.add_argument("--from-catalog")'],
         "batch.py": ['sub.add_parser("run")', 'pr.add_argument("--tags-mode")',
                      'pr.add_argument("--skip")', 'pr.add_argument("--json")'],
         "report.py": ['sub.add_parser(\n        "audit")', 'pa.add_argument("--char")'],
@@ -235,3 +236,66 @@ def test_run_refuses_to_start_against_an_outdated_checkout(tmp_path):
     from maestro.__main__ import build
     with pytest.raises(SystemExit, match="older than the contract"):
         build(_cfg(tmp_path, scraper_repo=str(_scraper(tmp_path, "old", capable=False))))
+
+
+def test_run_does_not_replay_a_run_s_whole_history_on_every_start(cfg, capsys):
+    """A durable log replayed from zero reprints every historical line at each
+    start — so a failure diagnosed and fixed weeks ago reappears looking current,
+    and gets debugged again. That is what happened with a stale session error.
+    """
+    loaded = load_config(cfg)
+    with Store(loaded["db"]) as store:
+        run_id = store.create_run("old", "/tmp/x",
+                                  [ProblemSeed(slug=SLUGS[0], idx=1, title="T", archive="a.zip")])
+        store.log(run_id, "error", "session check failed 3 time(s) LONG AGO")
+
+    assert main(["--config", str(cfg), "run", "--max-ticks", "1"]) == 0
+    err = capsys.readouterr().err
+    assert "LONG AGO" not in err, "history was replayed as if it were happening now"
+    assert "earlier event(s) not shown" in err, "and the omission must be stated"
+
+
+def test_run_echoes_events_logged_after_it_started(cfg, capsys):
+    """The cursor starts at the tail — it must not skip everything forever."""
+    loaded = load_config(cfg)
+    with Store(loaded["db"]) as store:
+        run_id = store.create_run("live", "/tmp/x",
+                                  [ProblemSeed(slug=SLUGS[0], idx=1, title="T", archive="a.zip")])
+        store.log(run_id, "info", "before the start")
+
+    sched, store = build(loaded, check=False)
+    try:
+        cursors: dict[int, int] = {}
+        import maestro.__main__ as m
+
+        seen: list[str] = []
+        # The same seed-then-follow logic `cmd_run` uses, driven directly so the
+        # second pass has something new to find.
+        def tail():
+            if run_id not in cursors:
+                last = store.last_event(run_id)
+                cursors[run_id] = last["id"] if last else 0
+                return
+            for r in store.events(run_id, after_id=cursors[run_id]):
+                cursors[run_id] = r["id"]
+                seen.append(r["message"])
+
+        tail()                                            # seeds past the history
+        store.log(run_id, "info", "NEW LINE AFTER START")
+        tail()
+        assert seen == ["NEW LINE AFTER START"]
+    finally:
+        store.close()
+
+
+def test_an_empty_divisions_config_is_a_warning_not_a_refusal(cfg):
+    """A batch with no divisions is ordinary; it must still start.
+
+    But the division step vanishes from the chore plan entirely when unset, with
+    nothing anywhere saying a step was dropped — so it has to be said here.
+    """
+    loaded = load_config(cfg)
+    assert loaded["divisions"] == ""
+    assert check_paths(loaded) == [], "an empty divisions must not block startup"
+    assert any("divisions" in w for w in check_warnings(loaded))
+    assert main(["--config", str(cfg), "run", "--max-ticks", "1"]) == 0
