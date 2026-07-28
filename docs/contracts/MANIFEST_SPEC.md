@@ -285,6 +285,8 @@ Run all of these; halt the run on any failure. They are deliberately redundant w
 | M-12 | Opening each archive: exactly one root folder, named `{slug}`; no binaries; no path traversal (`..`, absolute paths); no uppercase or non-ASCII entry names. |
 | M-13 | `preflight.status == "pass"` and `checks_failed == 0`. Any `waivers` present → require human acknowledgement before proceeding. |
 | M-14 | `set.delivery == "partial"` → do not run the fresh-import path; route to the update path. |
+| M-15 | A `limits` value departing from the default (TL 1 s / ML 256 MB) has a non-null `limits_rationale`. Without one, an intentional bump and a typo are the same edit. |
+| M-16 | `limits.measured_worst_s`, when present, is inside `time_limit_s` — at or above it the reference solution TLEs on its own measurement, and under 2× margin it is one slower judge from failing. Below 2× warns; at or above errors. |
 
 ---
 

@@ -144,6 +144,23 @@ CLAUSES: dict[str, Clause] = {
         "Run your own PREFLIGHT and fix what it reports before delivering. Waivers "
         "are permitted but stop the run for an operator to acknowledge, so a set "
         "delivered with waivers is a set that waits."),
+    "M-15": Clause(
+        "A time or memory limit that departs from the default (1 s / 256 MB) carries "
+        "a non-null `limits_rationale`.",
+        "CHARACTERISTICS_SPEC.md §5 Time and memory limits",
+        "State why, from the measurement: \"TL 2s: reference worst case 0.81s on "
+        "n=2·10^5 adversarial, 2.5x margin\". Without one an intentional bump and a "
+        "typo are the same edit, and a limit is the one authored value that fails "
+        "nothing when it is wrong — not the import, the build, the verify or the "
+        "audit, only a correct solution weeks later."),
+    "M-16": Clause(
+        "The reference solution's `measured_worst_s` fits inside its own "
+        "`time_limit_s`, with margin.",
+        "CHARACTERISTICS_SPEC.md §5 Time and memory limits",
+        "Raise the limit or make the reference faster. At or above the limit the "
+        "intended solution TLEs on your own measurement; under 2x margin it passes "
+        "today and fails on a slower judge, which is worse because it looks fine "
+        "until it does not."),
     "M-14": Clause(
         "`set.delivery == \"partial\"` routes to the update path, not a fresh import.",
         "MANIFEST_SPEC.md §3 M-14",

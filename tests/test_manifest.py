@@ -1,8 +1,8 @@
 import json
 
-from maestro.checks import ok
+from maestro.checks import Severity, errors, ok
 from maestro.manifest import validate
-from tests.conftest import _sha, _zip
+from tests.conftest import SLUGS, _sha, _zip
 
 
 def codes(f):
@@ -146,3 +146,67 @@ def test_short_file_reports_one_cause_not_three(set_dir):
     f = [x for x in validate(set_dir) if x.slug == "edu-arrays-running-max"]
     assert len(f) == 1
     assert "bytes on disk" in f[0].message
+
+
+# ------------------------------------------ the limits nobody was checking
+
+
+def _with_limits(set_dir, slug, **limits):
+    m = json.loads((set_dir / "MANIFEST.json").read_text())
+    for p in m["problems"]:
+        if p["slug"] == slug:
+            p["limits"] = {**p.get("limits", {}), **limits}
+    (set_dir / "MANIFEST.json").write_text(json.dumps(m))
+    return validate(set_dir)
+
+
+def test_a_non_default_limit_without_a_rationale_is_refused(set_dir):
+    """An intentional bump and a typo are the same edit without one."""
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=2, limits_rationale=None)
+    assert any(f.check == "M-15" and f.slug == SLUGS[0] for f in errors(found))
+
+
+def test_a_non_default_memory_limit_needs_one_too(set_dir):
+    found = _with_limits(set_dir, SLUGS[0], memory_limit_mb=512, limits_rationale="")
+    assert any(f.check == "M-15" for f in errors(found))
+
+
+def test_a_stated_rationale_satisfies_it(set_dir):
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=2, measured_worst_s=0.81,
+                         limits_rationale="reference worst case 0.81s, 2.5x margin")
+    assert not [f for f in found if f.check == "M-15"]
+
+
+def test_the_default_limits_need_no_justification(set_dir):
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=1, memory_limit_mb=256,
+                         limits_rationale=None)
+    assert not [f for f in found if f.check == "M-15"]
+
+
+def test_a_reference_that_does_not_fit_its_own_limit_is_an_error(set_dir):
+    """Its own measurement says the intended solution TLEs."""
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=1, measured_worst_s=1.2)
+    bad = [f for f in errors(found) if f.check == "M-16"]
+    assert bad and "TLEs" in bad[0].message
+
+
+def test_a_thin_margin_warns_rather_than_blocks(set_dir):
+    """0.7s under 1s passes today and fails on a slower judge — worse than a
+    hard failure, because it looks fine until it does not."""
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=1, measured_worst_s=0.7)
+    thin = [f for f in found if f.check == "M-16"]
+    assert thin and thin[0].severity is Severity.WARN
+    assert "1.4x margin" in thin[0].message
+    assert not errors(found)
+
+
+def test_a_healthy_margin_says_nothing(set_dir):
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=2, measured_worst_s=0.81,
+                         limits_rationale="2.5x margin")
+    assert not [f for f in found if f.check == "M-16"]
+
+
+def test_no_measurement_means_no_margin_finding(set_dir):
+    """Absent is not the same as bad — the field is optional in the schema."""
+    found = _with_limits(set_dir, SLUGS[0], time_limit_s=1, measured_worst_s=None)
+    assert not [f for f in found if f.check == "M-16"]

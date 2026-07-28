@@ -21,6 +21,11 @@ from typing import Any
 from .checks import Finding, Severity
 
 SUPPORTED_SCHEMA = {"1.0"}
+
+#: `CHARACTERISTICS_SPEC.md` §5. A limit equal to these needs no justification;
+#: anything else does, which is what makes an intentional bump legible.
+DEFAULT_TL_S = 1.0
+DEFAULT_ML_MB = 256
 SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 #: `CHARACTERISTICS_SPEC.md` §4, frozen at v1.0. Covers the **algorithmic** axis only.
@@ -174,6 +179,45 @@ def validate(set_dir: str | Path, *, extra_tags: set[str] | None = None) -> list
         total = sum(s.get("points", 0) for s in subs if s.get("id") != 0)
         if total != 100:
             err("M-10", f"non-sample subtask points sum to {total}, not 100", slug)
+
+    # M-15 / M-16 — the limits the author justified, against the measurement
+    # they justified them with.
+    #
+    # Both fields are in the schema and neither was checked. That is the whole
+    # reason this pair exists: a limit is the one authored value that fails
+    # nothing when it is wrong. It passes import, build, verify, upload and
+    # audit, and surfaces weeks later as a TLE on a correct submission.
+    for p in problems:
+        lim = p.get("limits") or {}
+        slug = p.get("slug")
+        tl, ml = lim.get("time_limit_s"), lim.get("memory_limit_mb")
+        measured = lim.get("measured_worst_s")
+
+        # M-15 — a deviation from the default without a stated reason is
+        # indistinguishable from a typo, which is exactly why the spec requires
+        # the rationale rather than merely inviting it.
+        non_default = (tl is not None and float(tl) != DEFAULT_TL_S) or \
+                      (ml is not None and int(ml) != DEFAULT_ML_MB)
+        if non_default and not (lim.get("limits_rationale") or "").strip():
+            err("M-15", f"TL {tl}s / ML {ml}MB departs from the default "
+                        f"({DEFAULT_TL_S:g}s / {DEFAULT_ML_MB}MB) with no limits_rationale — "
+                        f"an intentional bump and a typo look identical without one", slug)
+
+        if measured is None or tl is None:
+            continue
+        measured, tl = float(measured), float(tl)
+
+        # M-16 — the reference solution has to fit inside its own limit, and by
+        # a margin. `CHARACTERISTICS_SPEC` §5's worked example is 0.81s under a
+        # 2s limit: 2.5x. Below 2x the problem is one slower judge away from
+        # failing its own intended solution.
+        if measured >= tl:
+            err("M-16", f"the reference solution's measured worst case ({measured:g}s) is not "
+                        f"inside its own time limit ({tl:g}s) — the intended solution TLEs", slug)
+        elif measured * 2 > tl:
+            warn("M-16", f"measured worst case {measured:g}s against a {tl:g}s limit is only "
+                         f"{tl / measured:.1f}x margin; the spec's own example targets 2.5x, and "
+                         f"a correct solution this close fails on a slower judge day", slug)
 
     # M-13
     pf = m.get("preflight", {})

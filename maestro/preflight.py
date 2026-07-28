@@ -181,12 +181,26 @@ def compare(manifest: dict[str, Any], parsed: dict[str, Any]) -> list[Finding]:
         if not langs:
             err("P-5", "the importer parsed no statement language — this would import "
                        "with an empty statement", slug)
-        elif (n := len(d.get("languages") or [])) and n != len(langs):
-            # Identities are not comparable: the manifest uses `EN`/`RU` while the
-            # parser reports `english`/`russian`. The count is, and a difference is
-            # worth surfacing without pretending to know which one is right.
-            warn("P-5", f"manifest lists {n} language(s), the importer parsed "
-                        f"{len(langs)} ({', '.join(sorted(langs))})", slug)
+        else:
+            # The Middleman now returns `languageCodes` in the manifest's own
+            # vocabulary (`EN`/`RU`), so the two are directly comparable. Before
+            # that they were not — it reported `english`/`russian` — and this
+            # compared counts, which agrees whenever a set has the right *number*
+            # of the wrong languages. Codes when they are offered, counts when
+            # they are not, and the difference is stated rather than assumed.
+            want = {str(x).strip().upper() for x in (d.get("languages") or [])}
+            have = {str(x).strip().upper() for x in (p.get("languageCodes") or [])}
+            if want and have:
+                if absent := sorted(want - have):
+                    err("P-5", f"manifest declares {', '.join(absent)}, which the importer "
+                               f"does not parse (it finds {', '.join(sorted(have))})", slug)
+                if surplus := sorted(have - want):
+                    warn("P-5", f"the importer parses {', '.join(surplus)}, which the manifest "
+                                f"does not declare", slug)
+            elif want and len(want) != len(langs):
+                warn("P-5", f"manifest lists {len(want)} language(s), the importer parsed "
+                            f"{len(langs)} ({', '.join(sorted(langs))}) — compared by count "
+                            f"because this response carried no languageCodes", slug)
 
         # P-6 — a tests-only pack appends to a base problem instead of creating
         # one. If the manifest expected a whole problem here, the statement,

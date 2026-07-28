@@ -109,7 +109,7 @@ reported as killed rather than as a tool that failed.
 |---|---|
 | `maestro/model.py` | The two-level state vocabulary — run stages advance the batch, problem stages advance individually through the Polygon half |
 | `maestro/store.py` | Durable SQLite job store: resume across restarts, quarantine, identity map, cursor-tailed events |
-| `maestro/manifest.py` | `MANIFEST.json` cross-checks M-1…M-14, including opening every archive |
+| `maestro/manifest.py` | `MANIFEST.json` cross-checks M-1…M-16, including opening every archive and checking each limit against the measurement that justified it |
 | `maestro/characteristics.py` | Parses exactly as `batch.py` does, then checks the six things it cannot report |
 | `maestro/ingest.py` | Stage 1→2: sentinel detection, and telling "still copying" from "invalid" |
 | `maestro/divisions.py` | The nine division names, mirrored from the Scraper and pinned to it by test |
@@ -125,7 +125,7 @@ reported as killed rather than as a tool that failed.
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, set its own divisions/targets/list |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 461 tests, no external services required.
+`python -m pytest` — 473 tests, no external services required.
 
 Four of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of

@@ -85,13 +85,56 @@ def test_no_parsed_statement_is_an_error(set_dir):
     assert f[0].severity is Severity.ERROR
 
 
-def test_a_language_count_difference_only_warns(set_dir):
-    """`EN`/`RU` against `english`/`russian` — the identities aren't comparable."""
+def test_a_language_count_difference_only_warns_without_codes(set_dir):
+    """The fallback. `EN`/`RU` against `english`/`russian` are not comparable, so a
+    response carrying no `languageCodes` can only be checked by count — and the
+    finding has to say that, or the weaker check reads as the stronger one."""
     m = mf(set_dir)
     r = agreeing(m)
     r["problems"][0]["languages"] = ["english"]
     f = compare(m, r)
     assert [(x.check, x.severity) for x in f] == [("P-5", Severity.WARN)]
+    assert "compared by count" in f[0].message
+
+
+def test_a_declared_language_the_importer_cannot_parse_is_an_error(set_dir):
+    """The whole reason to compare codes: counts agree whenever a set has the
+    right *number* of the wrong languages."""
+    m = mf(set_dir)
+    r = agreeing(m)
+    r["problems"][0]["languages"] = ["english", "tajik"]
+    r["problems"][0]["languageCodes"] = ["EN", "TG"]     # manifest declares EN, RU
+    f = compare(m, r)
+    bad = [x for x in f if x.severity is Severity.ERROR]
+    assert bad and bad[0].check == "P-5"
+    assert "RU" in bad[0].message
+
+
+def test_an_extra_parsed_language_only_warns(set_dir):
+    """More statements than declared is odd, not wrong — nothing breaks."""
+    m = mf(set_dir)
+    r = agreeing(m)
+    r["problems"][0]["languages"] = ["english", "russian", "uzbek"]
+    r["problems"][0]["languageCodes"] = ["EN", "RU", "UZ"]
+    f = compare(m, r)
+    assert [(x.check, x.severity) for x in f] == [("P-5", Severity.WARN)]
+    assert "UZ" in f[0].message
+
+
+def test_matching_codes_produce_nothing(set_dir):
+    m = mf(set_dir)
+    r = agreeing(m)
+    for p in r["problems"]:
+        p["languageCodes"] = ["EN", "RU"]
+    assert compare(m, r) == []
+
+
+def test_codes_are_matched_regardless_of_case(set_dir):
+    m = mf(set_dir)
+    r = agreeing(m)
+    for p in r["problems"]:
+        p["languageCodes"] = ["en", "ru"]
+    assert compare(m, r) == []
 
 
 def test_a_tests_only_pack_where_a_problem_was_expected(set_dir):
