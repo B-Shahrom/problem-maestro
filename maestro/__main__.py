@@ -22,11 +22,12 @@ import sys
 from pathlib import Path
 
 from . import brief as brief_mod
+from . import divisions as div
 from . import feedback
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
 from .ingest import Verdict, inspect
-from .model import ProblemStage, RunStatus
+from .model import ProblemStage, RunStage, RunStatus
 from .polygon import PolygonClient
 from .polygon_lane import PolygonLane
 from .scheduler import Scheduler
@@ -354,6 +355,49 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     return worst
 
 
+def cmd_divisions(args: argparse.Namespace) -> int:
+    """Show or set one batch's division access. The dashboard's checklist, over ssh.
+
+    With no `--set`, it lists the nine names with the run's current selection
+    marked — which is also the answer to "what can I even pick", since the
+    vocabulary is closed and lives in the Scraper.
+    """
+    cfg = load_config(args.config)
+    with Store(cfg["db"]) as store:
+        run = store.get_run(args.run_id)
+        if run is None:
+            print(f"no run {args.run_id}", file=sys.stderr)
+            return 1
+
+        if args.default:
+            store.set_divisions(run.id, None)
+            print(f"run {run.id}: cleared — the configured default "
+                  f"({div.describe(cfg['divisions']) })  applies", file=sys.stderr)
+            return 0
+
+        if args.set is not None:
+            names, unknown = div.normalise(args.set)
+            if unknown:
+                print(f"unknown division(s): {', '.join(unknown)}\n"
+                      f"valid: {', '.join(div.DIVISIONS)}", file=sys.stderr)
+                return 1
+            spec = div.render(names)
+            store.set_divisions(run.id, spec)
+            store.log(run.id, "info", f"divisions: {div.describe(spec)}")
+            print(f"run {run.id}: {div.describe(spec)}", file=sys.stderr)
+            if run.stage in (RunStage.AUDIT, RunStage.DONE):
+                print("  [!] the chores have already run — this changes only what the "
+                      "audit checks for, not what was granted", file=sys.stderr)
+            return 0
+
+        effective = cfg["divisions"] if run.divisions is None else run.divisions
+        on = set(div.split(effective))
+        print(f"run {run.id}  {run.set_name}  {div.describe(run.divisions)}", file=sys.stderr)
+        for name in div.DIVISIONS:
+            print(f"  [{'x' if name in on else ' '}] {name}", file=sys.stderr)
+    return 0
+
+
 def cmd_forget(args: argparse.Namespace) -> int:
     """Delete Maestro's record of a run. Previews unless `--yes`.
 
@@ -487,6 +531,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status", help="Print every run and exit.").set_defaults(func=cmd_status)
     sub.add_parser("init", help="Write a starter config.").set_defaults(func=cmd_init)
     sub.add_parser("check", help="Validate the config's paths and exit.").set_defaults(func=cmd_check)
+    p_div = sub.add_parser("divisions", help="Show or set one batch's division access.")
+    p_div.add_argument("run_id", type=int)
+    p_div.add_argument("--set", help="Comma-separated names, or '' for none. "
+                                     "Omit to list the current selection.")
+    p_div.add_argument("--default", action="store_true",
+                       help="Clear the choice so the configured default applies again.")
+    p_div.set_defaults(func=cmd_divisions)
+
     p_forget = sub.add_parser("forget", help="Delete Maestro's record of a run.")
     p_forget.add_argument("run_id", type=int)
     p_forget.add_argument("--yes", action="store_true", help="Actually delete it.")

@@ -407,11 +407,23 @@ def test_reconcile_reads_the_catalog_in_one_page_load(tmp_path):
 def test_the_audit_pages_the_table_only_when_divisions_are_at_stake(tmp_path):
     """The catalog carries no `division_access`, so a run that granted some has
     to page. A run that granted none gains nothing from 41 page loads."""
+    from maestro.model import Run, RunStage, RunStatus
+
+    inherit = Run(id=1, set_name="s", set_dir="/x", stage=RunStage.AUDIT,
+                  status=RunStatus.RUNNING, divisions=None)
     with_div, _, s1 = _lane(tmp_path / "a", divisions="Electi")
     without, _, s2 = _lane(tmp_path / "b")
     try:
-        assert with_div._needs_paged_scrape() is True
-        assert without._needs_paged_scrape() is False
+        assert with_div._needs_paged_scrape(inherit) is True
+        assert without._needs_paged_scrape(inherit) is False
+
+        # And the run's own choice overrides the install's, both ways.
+        chosen = Run(id=1, set_name="s", set_dir="/x", stage=RunStage.AUDIT,
+                     status=RunStatus.RUNNING, divisions="Tier 1")
+        none_at_all = Run(id=1, set_name="s", set_dir="/x", stage=RunStage.AUDIT,
+                          status=RunStatus.RUNNING, divisions="")
+        assert without._needs_paged_scrape(chosen) is True
+        assert with_div._needs_paged_scrape(none_at_all) is False
     finally:
         s1.close()
         s2.close()

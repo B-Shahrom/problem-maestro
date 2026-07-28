@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import characteristics as char
+from . import divisions as div
 from . import manifest
 from .checks import Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
@@ -316,7 +317,16 @@ class ElectiCodeLane:
         """Must match `PolygonLane.upload_dir` — this is the handoff between halves."""
         return self.run_dir(run_id) / "upload"
 
-    def _needs_paged_scrape(self) -> bool:
+    def divisions_for(self, run) -> str:
+        """The divisions this batch asks for.
+
+        The run's own choice wins, and `""` is a choice: an operator who unticked
+        everything asked for none, not for whatever the install happens to be
+        configured with. Only `None` — never chosen — inherits the default.
+        """
+        return self.divisions if run.divisions is None else run.divisions
+
+    def _needs_paged_scrape(self, run) -> bool:
         """Whether stage 8 has to page the table instead of reading the catalog.
 
         The catalog is one page load against ~40, so the paged scrape is worth
@@ -335,7 +345,7 @@ class ElectiCodeLane:
         audit --char` skips its division check in exactly that state, so a run
         that silently used the catalog would pass an audit that never looked.
         """
-        return bool(self.divisions)
+        return bool(self.divisions_for(run))
 
     def _say(self, run_id: int, label: str) -> Reporter:
         """A live relay from one tool invocation into this run's event log.
@@ -615,7 +625,7 @@ class ElectiCodeLane:
             done = self._stages_done(run_id, group)
             r = self.client.chores(
                 path, tags_mode=group.tags_mode, apply=True,
-                divisions=self.divisions, targets=self.targets,
+                divisions=self.divisions_for(run), targets=self.targets,
                 list_url=self.list_url, fixmdx=self.fixmdx,
                 skip=",".join(done),
                 progress=self._say(run_id, f"chores/{group.name}"),
@@ -657,7 +667,8 @@ class ElectiCodeLane:
     def _audit(self, run_id: int, report: LaneReport) -> None:
         run = self.store.get_run(run_id)
         assert run is not None
-        paged = self._needs_paged_scrape()
+        wanted = self.divisions_for(run)
+        paged = self._needs_paged_scrape(run)
         scrape = self.client.scrape(self.artefact(run_id, "catalog-after.json"),
                                     from_catalog=not paged,
                                     progress=self._say(run_id, "catalog scrape"
@@ -681,12 +692,12 @@ class ElectiCodeLane:
         # in exactly the state that most needs it (see `divisions_landed`).
         if self._limits_wrong(run_id, run.set_dir, scrape.data or [], report):
             return
-        if self._divisions_wrong(run_id, scrape.data or [], problems, report):
+        if self._divisions_wrong(run_id, wanted, scrape.data or [], problems, report):
             return
 
         r = self.client.audit(self.artefact(run_id, "catalog-after.json"), path,
                               self.artefact(run_id, "audit.json"),
-                              divisions=self.divisions,
+                              divisions=wanted,
                               progress=self._say(run_id, "audit"))
         report.ran.append("audit")
         if r.outcome is Outcome.HALT and r.rc == 1:
@@ -700,7 +711,7 @@ class ElectiCodeLane:
         if not r.ok:
             self._setback(run_id, r, report, "audit")
             return
-        if self._audit_incomplete(run_id, r, report):
+        if self._audit_incomplete(run_id, wanted, r, report):
             return
 
         for p in problems:
@@ -742,8 +753,8 @@ class ElectiCodeLane:
             return True
         return False
 
-    def _divisions_wrong(self, run_id: int, rows: list[dict], problems: list[Problem],
-                         report: LaneReport) -> bool:
+    def _divisions_wrong(self, run_id: int, wanted: str, rows: list[dict],
+                         problems: list[Problem], report: LaneReport) -> bool:
         """Log the division verdict; fail the run if any grant did not land.
 
         Unlike a wrong limit this *is* fixable in place — `division set` is
@@ -751,7 +762,7 @@ class ElectiCodeLane:
         because a problem without division access is invisible to the students it
         was authored for, and a run that ends `done` is a run nobody looks at again.
         """
-        findings = divisions_landed(self.divisions, rows, [p.slug for p in problems])
+        findings = divisions_landed(wanted, rows, [p.slug for p in problems])
         for f in findings:
             self.store.log(run_id, "error" if f.severity is Severity.ERROR else "warn",
                            f"{f.check}: {f.message}", slug=f.slug)
@@ -762,7 +773,8 @@ class ElectiCodeLane:
             return True
         return False
 
-    def _audit_incomplete(self, run_id: int, r: Result, report: LaneReport) -> bool:
+    def _audit_incomplete(self, run_id: int, wanted: str, r: Result,
+                          report: LaneReport) -> bool:
         """Refuse to call a run done when the audit did not run every check.
 
         `report audit --char` exits **0** when it skips a check — correctly, since
@@ -778,7 +790,7 @@ class ElectiCodeLane:
         tool is willing to state the fact outright.
         """
         data = r.data if isinstance(r.data, dict) else {}
-        want = {"difficulty", "tags"} | ({"division"} if self.divisions else set())
+        want = {"difficulty", "tags"} | ({"division"} if wanted else set())
 
         if "checks_run" not in data:
             # An older tool that does not say. Not a block — it may well have run

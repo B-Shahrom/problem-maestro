@@ -87,6 +87,8 @@ python -m maestro inspect --report     # …and write a correction request besid
 python -m maestro run                  # scheduler + dashboard on :8787
 python -m maestro run -v               # …echoing every line the Scraper tools write
 python -m maestro status               # one-shot listing; non-zero if a run wants a human
+python -m maestro divisions 12         # what division access this batch asks for
+python -m maestro divisions 12 --set "Electi, Division A+"
 python -m maestro forget 12 --yes      # delete Maestro's record of run 12
 ```
 
@@ -109,6 +111,7 @@ reported as killed rather than as a tool that failed.
 | `maestro/manifest.py` | `MANIFEST.json` cross-checks M-1…M-14, including opening every archive |
 | `maestro/characteristics.py` | Parses exactly as `batch.py` does, then checks the six things it cannot report |
 | `maestro/ingest.py` | Stage 1→2: sentinel detection, and telling "still copying" from "invalid" |
+| `maestro/divisions.py` | The nine division names, mirrored from the Scraper and pinned to it by test — chosen per batch, not per install |
 | `maestro/brief.py` | Stage 0: the instruction sent to the author, generated from the constants the gate enforces so the two cannot drift |
 | `maestro/preflight.py` | P-1…P-6: the manifest against what the Middleman's own parser says will import — optional, so ingest still works with the service down |
 | `maestro/feedback.py` | The author's half of a rejection: every check paired with the contract clause it enforces, and an explicit list of the checks that never ran |
@@ -117,10 +120,10 @@ reported as killed rather than as a tool that failed.
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: output streams out live, exit codes carry the decision, a killed process is told apart from a failed one, and nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
 | `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
-| `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only three mutations in the system: approve a run's writes, resume a stopped one, delete one |
+| `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, pick its divisions |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 413 tests, no external services required.
+`python -m pytest` — 443 tests, no external services required.
 
 Four of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of

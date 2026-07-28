@@ -127,6 +127,14 @@ class Run:
     block_reason: BlockReason | None = None
     error: str | None = None
 
+    divisions: str | None = None
+    """Division access this batch asks for — see `maestro.divisions`.
+
+    `None` means never chosen, so the configured default applies. `""` means
+    chosen and deliberately empty, which must NOT fall back: an operator who
+    unticked everything asked for no divisions, not for the default.
+    """
+
     approved: bool = False
     """An operator has let this run write to ElectiCode.
 

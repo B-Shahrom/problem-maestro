@@ -132,3 +132,55 @@ def test_a_running_stage_s_progress_is_visible_on_the_page(page, live):
     # The heartbeat is the line that answers "is it stuck", so it must stand out.
     warns = page.eval_on_selector_all("#log .warn", "els => els.map(e => e.textContent)")
     assert any("312s" in w for w in warns)
+
+
+def test_the_division_checklist_is_rendered_and_saves(page, live):
+    """Nine boxes, ticked, saved — clicked rather than asserted about.
+
+    The last page change shipped inert with every server-side test green, so a
+    new control gets driven for real before it is called done.
+    """
+    from maestro import divisions as div
+
+    store, run_id, url = live
+    _open(page, url)
+    page.wait_for_selector("#divs input")
+
+    labels = page.eval_on_selector_all("#divs input", "els => els.map(e => e.value)")
+    assert labels == list(div.DIVISIONS)
+
+    page.check("#divs input[value='Electi']")
+    page.check("#divs input[value='Division A+']")
+    page.click("[data-act='save-divisions']")
+    page.wait_for_function(
+        "document.querySelector('#divs .head').textContent.includes('Division A+')",
+        timeout=10_000)
+
+    assert store.get_run(run_id).divisions == "Electi, Division A+"
+    assert page.errors == []
+
+
+def test_the_checklist_reloads_ticked_and_can_be_cleared(page, live):
+    store, run_id, url = live
+    store.set_divisions(run_id, "Tier 1")
+    _open(page, url)
+    page.wait_for_selector("#divs input[value='Tier 1']:checked")
+
+    page.click("[data-act='reset-divisions']")
+    page.wait_for_function(
+        "document.querySelector('#divs .head').textContent.includes('configured default')",
+        timeout=10_000)
+    assert store.get_run(run_id).divisions is None
+    assert page.errors == []
+
+
+def test_a_poll_does_not_wipe_a_half_ticked_checklist(page, live):
+    """The page refreshes every three seconds; re-rendering under the operator's
+    hands would silently discard boxes they had just ticked."""
+    _, _, url = live
+    _open(page, url)
+    page.wait_for_selector("#divs input")
+    page.check("#divs input[value='Division C']")
+
+    page.wait_for_timeout(3500)   # at least one full poll
+    assert page.is_checked("#divs input[value='Division C']")

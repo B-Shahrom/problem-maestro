@@ -5,7 +5,7 @@ a run parked on an expired session, a batch stopped mid-chore chain, an audit
 that found a gap. Those states were designed to wait for a human, and until now
 the only way to see or clear one was `sqlite3` at a prompt.
 
-Three mutations, and only three. Each is a decision the state machine
+Four mutations, and only four. Each is a decision the state machine
 deliberately refuses to make for itself:
 
 * **approve** opens the apply gate for one run. Per-run because a scheduler-wide
@@ -16,6 +16,9 @@ deliberately refuses to make for itself:
 * **forget** deletes the run. The only destructive action here, and the only one
   that is not reversible — see `Store.delete_run` for what it does and, more
   importantly, what it does not undo.
+* **divisions** picks which divisions this batch is granted to. A per-batch
+  choice rather than a per-install one, because that is what it actually is —
+  see `maestro.divisions`.
 
 None of them retries anything by itself. Clearing the status only makes the run
 eligible for the next tick, and the lane's own idempotency rules still decide
@@ -30,7 +33,8 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from .model import RunStatus
+from . import divisions as div
+from .model import RunStage, RunStatus
 from .store import Store
 
 #: Browsers send a cross-origin form POST without a preflight, so a page on
@@ -74,6 +78,10 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if not parts:
                 return self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            if parts == ["api", "divisions"]:
+                # The vocabulary, served rather than duplicated in the page, so
+                # the checklist and the validator can never list different names.
+                return self._send(200, {"divisions": list(div.DIVISIONS)})
             if parts == ["api", "runs"]:
                 return self._send(200, {"runs": [self._summary(r)
                                                  for r in self._store.list_runs()]})
@@ -98,7 +106,7 @@ class _Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "bad run id"})
         action = parts[3]
-        if action not in ("approve", "resume", "forget"):
+        if action not in ("approve", "resume", "forget", "divisions"):
             return self._send(404, {"error": f"unknown action {action!r}"})
 
         run = self._store.get_run(run_id)
@@ -106,6 +114,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": f"no run {run_id}"})
         if action == "forget":
             return self._forget(run)
+        if action == "divisions":
+            return self._divisions(run)
         getattr(self, f"_{action}")(run)
         self._send(200, {"run": self._summary(self._store.get_run(run_id))})
 
@@ -118,6 +128,50 @@ class _Handler(BaseHTTPRequestHandler):
             # An approval that left the run blocked would need a second click to
             # do anything, and the operator has already said what they want.
             self._resume(run)
+
+    def _divisions(self, run) -> None:
+        """Set this batch's division access from a ticked list.
+
+        Validated against the closed vocabulary here rather than left to the
+        Scraper. `division set` does reject an unknown name — with exit `1`, at
+        the *end* of the chore chain, after `fixmdx` and `metadata` have already
+        run and been paid for. Catching it at the moment of choosing costs one
+        comparison.
+
+        Sent after the chores have run, it is accepted and recorded but says so:
+        the grant already happened (or did not), and changing the number now
+        changes only what the audit will look for.
+        """
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._send(400, {"error": "expected a JSON body"})
+
+        raw = body.get("divisions")
+        if raw is None:
+            # Explicit null restores the configured default; an empty list does
+            # not. They are different requests and must not collapse.
+            self._store.set_divisions(run.id, None)
+            self._store.log(run.id, "info", "divisions: cleared — the configured default applies")
+            return self._send(200, {"run": self._summary(self._store.get_run(run.id))})
+
+        if not isinstance(raw, list) or any(not isinstance(x, str) for x in raw):
+            return self._send(400, {"error": "divisions must be a list of names, or null"})
+        names, unknown = div.normalise(", ".join(raw))
+        if unknown:
+            return self._send(400, {"error": f"unknown division(s): {', '.join(unknown)}. "
+                                             f"Valid: {', '.join(div.DIVISIONS)}"})
+
+        spec = div.render(names)
+        self._store.set_divisions(run.id, spec)
+        note = ""
+        if run.stage in (RunStage.AUDIT, RunStage.DONE):
+            note = (" — but the chores have already run, so this changes only what the "
+                    "audit checks for, not what was granted")
+        self._store.log(run.id, "info",
+                        f"divisions: {div.describe(spec)}{note}")
+        self._send(200, {"run": self._summary(self._store.get_run(run.id)), "note": note})
 
     def _forget(self, run) -> None:
         """Delete a run, unless a subprocess is still working on its behalf.
@@ -173,6 +227,9 @@ class _Handler(BaseHTTPRequestHandler):
             "block_reason": str(run.block_reason) if run.block_reason else None,
             "error": run.error,
             "approved": run.approved,
+            "divisions": run.divisions,
+            "divisions_label": div.describe(run.divisions),
+            "divisions_locked": run.stage in (RunStage.AUDIT, RunStage.DONE),
             "problems": len(run.problems),
             "by_status": by_status,
             "updated_at": run.updated_at,
@@ -239,6 +296,11 @@ PAGE = """<!doctype html>
   .dim { color: var(--dim); }
   button { font: inherit; padding: .2rem .7rem; margin-right: .4rem; cursor: pointer; }
   button.danger { color: #d33; float: right; margin-right: 0; }
+  #divs { margin-top: .7rem; }
+  #divs label { display: inline-block; margin-right: .9rem; white-space: nowrap; cursor: pointer; }
+  #divs input { vertical-align: -1px; margin-right: .25rem; }
+  #divs .head { color: var(--dim); margin-bottom: .3rem; }
+  #divs.locked label { opacity: .55; cursor: default; }
   .debug { color: var(--dim); }
   #log { white-space: pre-wrap; max-height: 22rem; overflow-y: auto; border: 1px solid var(--line);
          padding: .6rem; margin-top: .8rem; }
@@ -251,11 +313,12 @@ PAGE = """<!doctype html>
 <tbody id="runs"></tbody></table>
 <div id="detail" hidden>
   <div id="actions"></div>
+  <div id="divs"></div>
   <div id="err"></div>
   <div id="log"></div>
 </div>
 <script>
-let sel = null, cursor = 0, runs = [];
+let sel = null, cursor = 0, runs = [], DIVISIONS = [];
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -270,8 +333,32 @@ document.addEventListener("click", ev => {
   const el = ev.target.closest("[data-act]");
   if (!el) return;
   const id = Number(el.dataset.id);
-  if (el.dataset.act === "select") select(id); else post(id, el.dataset.act);
+  const act = el.dataset.act;
+  if (act === "select") select(id);
+  else if (act === "save-divisions") saveDivisions(id);
+  else if (act === "reset-divisions") resetDivisions(id);
+  else post(id, act);
 });
+
+async function saveDivisions(id) {
+  // Ticked boxes only — an empty list is a real answer ("grant nothing"), which
+  // is why it is sent as [] rather than omitted. `null` is a separate request
+  // that restores the configured default.
+  const picked = [...document.querySelectorAll("#divs input:checked")].map(b => b.value);
+  await send(id, "divisions", { divisions: picked });
+}
+
+async function resetDivisions(id) { await send(id, "divisions", { divisions: null }); }
+
+async function send(id, action, body) {
+  const r = await fetch(`/api/runs/${id}/${action}`, {
+    method: "POST", headers: { "X-Maestro": "1", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const err = document.getElementById("err");
+  err.textContent = r.ok ? "" : (await r.json()).error;
+  refresh();
+}
 
 async function post(id, action) {
   const run = runs.find(r => r.id === id);
@@ -297,6 +384,7 @@ async function post(id, action) {
 function select(id) { sel = id; cursor = 0; document.getElementById("log").textContent = ""; refresh(); }
 
 async function refresh() {
+  if (!DIVISIONS.length) DIVISIONS = (await (await fetch("/api/divisions")).json()).divisions;
   runs = (await (await fetch("/api/runs")).json()).runs;
   document.getElementById("runs").innerHTML = runs.map(r => `
     <tr data-act="select" data-id="${r.id}" class="${r.id === sel ? "sel" : ""}">
@@ -316,6 +404,28 @@ async function refresh() {
         `<button data-act="approve" data-id="${run.id}">approve writes</button>`) +
       (stopped ? `<button data-act="resume" data-id="${run.id}">resume</button>` : "") +
       `<button class="danger" data-act="forget" data-id="${run.id}">delete run</button>`;
+    // Re-rendered only when the selection or the stored value changes, so a
+    // half-ticked checklist is not wiped by the three-second poll underneath it.
+    const stamp = `${run.id}:${run.divisions}:${run.divisions_locked}`;
+    const box = document.getElementById("divs");
+    if (box.dataset.stamp !== stamp) {
+      box.dataset.stamp = stamp;
+      box.className = run.divisions_locked ? "locked" : "";
+      const on = new Set((run.divisions ?? "").split(",").map(s => s.trim()).filter(Boolean));
+      const dis = run.divisions_locked ? " disabled" : "";
+      box.innerHTML =
+        `<div class="head">division access &middot; ${esc(run.divisions_label)}` +
+        (run.divisions_locked ? " &middot; chores already ran" : "") + `</div>` +
+        DIVISIONS.map(d =>
+          `<label><input type="checkbox" value="${esc(d)}"${on.has(d) ? " checked" : ""}${dis}>` +
+          `${esc(d)}</label>`).join("") +
+        (run.divisions_locked ? "" :
+          `<div style="margin-top:.5rem">` +
+          `<button data-act="save-divisions" data-id="${run.id}">save divisions</button>` +
+          `<button data-act="reset-divisions" data-id="${run.id}">use config default</button>` +
+          `</div>`);
+    }
+
     const { events, cursor: c } = await (await fetch(`/api/runs/${sel}/events?after=${cursor}`)).json();
     cursor = c;
     if (events.length) {

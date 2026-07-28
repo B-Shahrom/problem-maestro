@@ -650,7 +650,7 @@ def test_an_audit_that_skipped_a_check_does_not_finish_the_run(lane):
     rep = LaneReport()
     skipped = _audit_result({"checks_run": ["difficulty", "tags"], "skipped": ["division"],
                              "issues": {}, "total": 2})
-    assert l._audit_incomplete(run_id, skipped, rep) is True
+    assert l._audit_incomplete(run_id, "Electi", skipped, rep) is True
     assert rep.blocked is BlockReason.AWAITING_APPROVAL
     assert store.get_run(run_id).status is RunStatus.BLOCKED
     note = store.last_event(run_id)["message"]
@@ -665,7 +665,7 @@ def test_an_audit_that_ran_everything_finishes_the_run(lane):
     rep = LaneReport()
     full = _audit_result({"checks_run": ["difficulty", "tags", "division"],
                           "skipped": [], "issues": {}, "total": 2})
-    assert l._audit_incomplete(run_id, full, rep) is False
+    assert l._audit_incomplete(run_id, "Electi", full, rep) is False
     assert rep.blocked is None
 
 
@@ -676,7 +676,7 @@ def test_no_division_configured_means_no_division_check_is_expected(lane):
     l.divisions = ""
     rep = LaneReport()
     two = _audit_result({"checks_run": ["difficulty", "tags"], "skipped": [], "issues": {}})
-    assert l._audit_incomplete(run_id, two, rep) is False
+    assert l._audit_incomplete(run_id, "", two, rep) is False
 
 
 def test_a_tool_that_does_not_say_which_checks_ran_is_noted_not_blocked(lane):
@@ -687,7 +687,7 @@ def test_a_tool_that_does_not_say_which_checks_ran_is_noted_not_blocked(lane):
     l.divisions = "Electi"
     rep = LaneReport()
     silent = _audit_result({"issues": {}, "total": 2})
-    assert l._audit_incomplete(run_id, silent, rep) is False
+    assert l._audit_incomplete(run_id, "Electi", silent, rep) is False
     assert "did not report which checks it ran" in store.last_event(run_id)["message"]
 
 

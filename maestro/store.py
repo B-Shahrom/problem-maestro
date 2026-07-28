@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS runs (
     block_reason TEXT,
     error        TEXT,
     approved     INTEGER NOT NULL DEFAULT 0,
+    divisions    TEXT,
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
@@ -128,6 +129,11 @@ class Store:
         have = {r["name"] for r in self._db.execute("PRAGMA table_info(runs)")}
         if "approved" not in have:
             self._db.execute("ALTER TABLE runs ADD COLUMN approved INTEGER NOT NULL DEFAULT 0")
+        if "divisions" not in have:
+            # Nullable on purpose. NULL is "never chosen, inherit the config";
+            # an empty string is "chosen, none". Collapsing the two would make
+            # every pre-existing run silently adopt whatever the config says.
+            self._db.execute("ALTER TABLE runs ADD COLUMN divisions TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -203,6 +209,7 @@ class Store:
             status=RunStatus(row["status"]),
             block_reason=BlockReason(row["block_reason"]) if row["block_reason"] else None,
             error=row["error"],
+            divisions=row["divisions"],
             approved=bool(row["approved"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -239,6 +246,18 @@ class Store:
         args.append(run_id)
         with self._tx() as db:
             db.execute(f"UPDATE runs SET {', '.join(sets)} WHERE id=?", args)
+
+    def set_divisions(self, run_id: int, spec: str | None) -> None:
+        """Record which divisions this batch asks for. `None` restores the default.
+
+        Separate from `set_run` because it is an operator's decision rather than
+        a state transition, and because `None` here means something — "inherit
+        the config" — that `set_run`'s omit-to-leave-unchanged convention cannot
+        express.
+        """
+        with self._tx() as db:
+            db.execute("UPDATE runs SET divisions=?, updated_at=? WHERE id=?",
+                       (spec, _now(), run_id))
 
     def approve(self, run_id: int) -> None:
         """Record an operator's decision to let this run write to ElectiCode.

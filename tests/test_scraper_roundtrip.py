@@ -220,3 +220,34 @@ def test_a_catalog_sourced_audit_reports_the_division_check_as_not_run(tmp_path)
     assert rc == 0, "the tool passes — which is exactly why the skip must be read"
     assert data["skipped"] == ["division"]
     assert "division" not in data["checks_run"]
+
+
+def test_maestro_offers_exactly_the_divisions_the_scraper_knows():
+    """A name in the checklist that `division set` rejects is a chore chain that
+    dies at its last step — after fixmdx and metadata have run and been paid for.
+
+    Pinned against the Scraper's own constant rather than a copy of it, because
+    the checklist is only safe while the two lists are the same list.
+    """
+    from maestro import divisions as div
+
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import division_access
+
+    assert list(div.DIVISIONS) == list(division_access.DIVISIONS)
+
+
+def test_maestro_canonicalises_names_the_same_way_the_scraper_does():
+    """Case-folding that disagreed would send a name the tool then rejects."""
+    from maestro import divisions as div
+
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import division_access
+
+    for probe in ("electi", "ELECTI", " Division A+ ", "tier 3", "Divison A"):
+        mine, my_unknown = div.normalise(probe)
+        theirs, their_unknown = division_access._normalize_divisions([probe])
+        assert mine == theirs, probe
+        assert bool(my_unknown) == bool(their_unknown), probe
