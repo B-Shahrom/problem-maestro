@@ -120,7 +120,7 @@ reported as killed rather than as a tool that failed.
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only three mutations in the system: approve a run's writes, resume a stopped one, delete one |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 402 tests, no external services required.
+`python -m pytest` — 413 tests, no external services required.
 
 Four of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of
@@ -131,8 +131,9 @@ drifting — the dashboard's delete button once shipped inert with every server-
   not inspected. Needs `pip install playwright`; it uses an already-installed browser and
   never downloads one
 - `test_scraper_roundtrip.py` — every command line Maestro builds, fed to the Scraper's own
-  argument parsers. It found `--state` being sent to `report.py`, which does not take one, so
-  stage 8 could never have succeeded
+  argument parsers, plus stage 8 run end to end against the real `report.py`. It found
+  `--state` being sent to `report.py`, which does not take one, so stage 8 could never have
+  succeeded — and stage 8 is the only stage no live run has yet reached
 
 - `test_characteristics_roundtrip.py` — the characteristics Maestro renders, parsed back by
   the real `batch.py`, down to the positional tag alignment and the flag that protects

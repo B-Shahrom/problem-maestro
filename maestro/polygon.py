@@ -180,7 +180,8 @@ class PolygonClient:
         Polygon through `problem.updateInfo`, overwriting whatever the archive
         implied. A problem authored at 2 s would then run at the server default,
         and nothing downstream would notice: it imports, builds and verifies
-        clean, and ElectiCode renders the limits read-only from the package, so
+        clean, and the limits arrive with the package with nothing downstream
+        revisiting them, so
         there is no later stage where a wrong one is visible. It surfaces
         eventually as unexplained TLEs on correct solutions.
 

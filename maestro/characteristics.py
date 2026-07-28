@@ -51,7 +51,7 @@ class Row:
     """Time and memory limits, verbatim (`2 s`, `256 MB`).
 
     `batch.py` parses neither — nothing in the ElectiCode half can set a limit,
-    because the platform renders both read-only from the imported package. They
+    because nothing Maestro drives can set them on the platform yet. They
     are captured here purely so C-7 can cross-check them against the manifest,
     which *is* what Maestro sends to Polygon. Two authored copies of the same
     fact, and until C-7 nothing compared them.
@@ -267,9 +267,14 @@ def precheck(char_path: str | Path, manifest: dict[str, Any]) -> list[Finding]:
     #
     # The manifest's `limits` is what Maestro sends to Polygon on import. The
     # characteristics' TL/ML columns are read by nothing at all: `batch.py` does not
-    # parse them, and ElectiCode renders both fields read-only from the imported
-    # package. So a disagreement resolves silently in the manifest's favour, and the
-    # authored intent in the characteristics is lost without a trace.
+    # parse them, and no Scraper command sets them on the platform — the values
+    # arrive with the imported package and nothing downstream revisits them. So a
+    # disagreement resolves silently in the manifest's favour, and the authored
+    # intent in the characteristics is lost without a trace.
+
+    # (The platform *does* have a way to set both; it is simply not exposed by any
+    # tool Maestro drives yet. When it is, this check keeps its value — it is what
+    # decides which of the two authored copies is the one to send.)
     #
     # That matters because a wrong limit is invisible for a long time. It does not
     # fail the import, the build, the verify, or the audit — it fails *solutions*,

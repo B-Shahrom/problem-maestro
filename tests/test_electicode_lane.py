@@ -37,6 +37,7 @@ class FakeScraper:
         self.chore_warnings: list[str] = []
         self.fail_at = "division"             # which stage stops on a non-zero rc
         self.audit_rc = 0
+        self.audit_extra: dict = {}
         self.exists: set[str] = set()
         self.overwrite_names: dict[str, str] = {}
         self.catalog_slugs: list[str] | None = None      # None → every uploaded slug
@@ -120,8 +121,10 @@ class FakeScraper:
 
     def _report(self, argv):
         out = Path(self._opt(argv, "--output"))
-        out.write_text(json.dumps({"total": 2, "counts": {"difficulty_mismatch": 1},
-                                   "issues": {}}), encoding="utf-8")
+        payload = {"total": 2, "counts": {"difficulty_mismatch": 1}, "issues": {},
+                   "checks_run": ["difficulty", "tags", "division"], "skipped": []}
+        payload.update(self.audit_extra)
+        out.write_text(json.dumps(payload), encoding="utf-8")
         return self.audit_rc, "", ""
 
 
@@ -624,4 +627,91 @@ def test_a_batch_with_no_division_access_fails_the_audit(lane):
 def test_granted_divisions_let_the_audit_proceed(lane):
     lane_, store, fake, run_id = lane
     _drive(lane_, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE
+
+
+# ------------------------------------------ an audit that skipped a check
+
+
+def _audit_result(payload):
+    from maestro.scraper import Outcome, Result
+    return Result(argv=["report.py"], rc=0, stdout="", stderr="",
+                  outcome=Outcome.OK, reason="ok", data=payload)
+
+
+def test_an_audit_that_skipped_a_check_does_not_finish_the_run(lane):
+    """`report audit --char` exits 0 when it *skips* the division check, and says
+    so in `skipped`. Reading that is the last link in a chain that otherwise ends
+    with an unverified grant marked done."""
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    from maestro.electicode_lane import LaneReport
+
+    rep = LaneReport()
+    skipped = _audit_result({"checks_run": ["difficulty", "tags"], "skipped": ["division"],
+                             "issues": {}, "total": 2})
+    assert l._audit_incomplete(run_id, skipped, rep) is True
+    assert rep.blocked is BlockReason.AWAITING_APPROVAL
+    assert store.get_run(run_id).status is RunStatus.BLOCKED
+    note = store.last_event(run_id)["message"]
+    assert "division" in note and "not that the batch is correct" in note
+
+
+def test_an_audit_that_ran_everything_finishes_the_run(lane):
+    from maestro.electicode_lane import LaneReport
+
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    rep = LaneReport()
+    full = _audit_result({"checks_run": ["difficulty", "tags", "division"],
+                          "skipped": [], "issues": {}, "total": 2})
+    assert l._audit_incomplete(run_id, full, rep) is False
+    assert rep.blocked is None
+
+
+def test_no_division_configured_means_no_division_check_is_expected(lane):
+    from maestro.electicode_lane import LaneReport
+
+    l, store, fake, run_id = lane
+    l.divisions = ""
+    rep = LaneReport()
+    two = _audit_result({"checks_run": ["difficulty", "tags"], "skipped": [], "issues": {}})
+    assert l._audit_incomplete(run_id, two, rep) is False
+
+
+def test_a_tool_that_does_not_say_which_checks_ran_is_noted_not_blocked(lane):
+    """An older report.py may well have run everything — but must not read as proof."""
+    from maestro.electicode_lane import LaneReport
+
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    rep = LaneReport()
+    silent = _audit_result({"issues": {}, "total": 2})
+    assert l._audit_incomplete(run_id, silent, rep) is False
+    assert "did not report which checks it ran" in store.last_event(run_id)["message"]
+
+
+def test_a_skipped_audit_check_stops_the_run_short_of_done(lane):
+    """The wiring, not just the predicate.
+
+    A test that calls `_audit_incomplete` directly still passes when the call is
+    deleted from `_audit` — which is exactly the mutation that would ship a run
+    marked DONE on an audit that never checked the divisions.
+    """
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    fake.audit_extra = {"checks_run": ["difficulty", "tags"], "skipped": ["division"]}
+
+    _drive(l, store, run_id)
+    run = store.get_run(run_id)
+    assert run.stage is not RunStage.DONE, "an unverified division grant reached DONE"
+    assert run.status is RunStatus.BLOCKED
+    assert "did not run every check" in store.last_event(run_id)["message"]
+
+
+def test_a_complete_audit_still_reaches_done_with_divisions_configured(lane):
+    """The gate must not block a run that genuinely checked everything."""
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    _drive(l, store, run_id)
     assert store.get_run(run_id).stage is RunStage.DONE

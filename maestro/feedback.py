@@ -189,7 +189,7 @@ CLAUSES: dict[str, Clause] = {
         "`limits`.",
         "CHARACTERISTICS_SPEC.md §5 Time and memory limits",
         "Make the two copies agree. Only the manifest is ever acted on — the columns "
-        "are read by nothing, and the platform renders both fields read-only — so a "
+        "are read by nothing, and no tool Maestro drives can set them yet — so a "
         "disagreement is resolved silently in the manifest's favour and surfaces much "
         "later as unexplained TLE on a correct solution."),
 

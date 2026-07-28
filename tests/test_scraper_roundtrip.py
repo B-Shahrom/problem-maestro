@@ -122,3 +122,101 @@ def test_the_catalog_shortcut_is_really_available():
     argv = _argv_for("problem_scraper.py")
     assert "--from-catalog" in argv
     parser.parse_args(argv)  # raises SystemExit if the checkout predates T2
+
+
+# --------------------------------------------------------------- stage 8
+
+"""Stage 8 has never once succeeded live — the `--state` bug stopped it before
+it ever ran. So it is exercised here against the real `report.py`, on exactly the
+files Maestro writes, rather than waiting for the next live run to find whatever
+is behind it."""
+
+import json
+import subprocess
+
+from maestro import characteristics as char
+
+
+def _catalog(rows: list[dict], source: str = "paged") -> dict:
+    """A scrape file in `problem_scraper --format json`'s shape."""
+    return {"source": source, "count": len(rows), "expected_total": len(rows),
+            "problems": rows}
+
+
+def _run_audit(tmp_path, rows, char_md, *, divisions="", source="paged"):
+    """Invoke the real report.py the way Maestro does, and read what it wrote."""
+    scrape = tmp_path / "catalog-after.json"
+    scrape.write_text(json.dumps(_catalog(rows, source)), encoding="utf-8")
+    chars = tmp_path / "characteristics-audited.md"
+    chars.write_text(char_md, encoding="utf-8")
+    out = tmp_path / "audit.json"
+
+    argv = [sys.executable, str(REPO / "report.py"), "audit",
+            "--input", str(scrape), "--char", str(chars),
+            "--format", "json", "--output", str(out)]
+    if divisions:
+        argv += ["--divisions", divisions]
+    p = subprocess.run(argv, capture_output=True, text=True, cwd=REPO, timeout=120)
+    data = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
+    return p.returncode, data, p.stderr
+
+
+def _authored(tmp_path):
+    """A characteristics file rendered by Maestro, and the scrape that matches it."""
+    from tests.conftest import CHAR
+
+    parsed = char.parse(CHAR)
+    md = char.render(char.subset(parsed, [r.slug for r in parsed.rows]))
+    rows = [{"s3_id": r.slug, "name": r.title, "difficulty": r.group.title(),
+             "category": ", ".join(t.strip() for t in parsed.tags[i].split(",")),
+             "division_access": "Electi", "submissions": "0"}
+            for i, r in enumerate(parsed.rows)]
+    return md, rows
+
+
+def test_stage_8_passes_on_a_batch_that_landed_correctly(tmp_path):
+    """The path no live run has reached. If this is wrong, so is the pipeline's end."""
+    md, rows = _authored(tmp_path)
+    rc, data, err = _run_audit(tmp_path, rows, md, divisions="Electi")
+    assert rc == 0, f"a correct batch was audited as wrong:\n{json.dumps(data, indent=2)}\n{err}"
+    assert data["issues"] == {k: [] for k in data["issues"]}
+    assert "division" in data["checks_run"], "the division check must actually have run"
+
+
+def test_stage_8_catches_a_difficulty_that_did_not_land(tmp_path):
+    md, rows = _authored(tmp_path)
+    rows[0]["difficulty"] = "Hard"
+    rc, data, _ = _run_audit(tmp_path, rows, md)
+    assert rc == 1
+    assert data["issues"]["difficulty_mismatch"][0]["s3_id"] == rows[0]["s3_id"]
+
+
+def test_stage_8_catches_a_tag_that_did_not_land(tmp_path):
+    md, rows = _authored(tmp_path)
+    rows[0]["category"] = "academy exam"
+    rc, data, _ = _run_audit(tmp_path, rows, md)
+    assert rc == 1
+    assert data["issues"]["tags_missing"]
+
+
+def test_stage_8_catches_a_missing_division_on_a_paged_scrape(tmp_path):
+    """All-empty division access on a PAGED scrape is what a failed division step
+    looks like. It must fail loudly, not be explained away."""
+    md, rows = _authored(tmp_path)
+    for r in rows:
+        r["division_access"] = ""
+    rc, data, _ = _run_audit(tmp_path, rows, md, divisions="Electi")
+    assert rc == 1
+    assert data["issues"]["division_missing"]
+    assert data["skipped"] == []
+
+
+def test_a_catalog_sourced_audit_reports_the_division_check_as_not_run(tmp_path):
+    """Exit 0 here does NOT mean the divisions landed. Maestro must read `skipped`."""
+    md, rows = _authored(tmp_path)
+    for r in rows:
+        r.pop("division_access")
+    rc, data, err = _run_audit(tmp_path, rows, md, divisions="Electi", source="catalog")
+    assert rc == 0, "the tool passes — which is exactly why the skip must be read"
+    assert data["skipped"] == ["division"]
+    assert "division" not in data["checks_run"]

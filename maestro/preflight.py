@@ -75,8 +75,9 @@ def limits_landed(manifest: dict[str, Any], rows: list[dict[str, Any]]) -> list[
         out.append(Finding(
             "L-2", Severity.WARN,
             "the catalog carried no time_limit_ms/memory_limit_kb, so the authored "
-            "limits could not be verified — they are read-only on the platform, so "
-            "nothing else will check them"))
+            "limits could not be verified. Neither scrape source carries the "
+            "fields, so this cannot close until the Scraper exposes them — and "
+            "nothing else checks them"))
     return out
 
 

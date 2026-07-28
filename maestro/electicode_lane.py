@@ -700,6 +700,8 @@ class ElectiCodeLane:
         if not r.ok:
             self._setback(run_id, r, report, "audit")
             return
+        if self._audit_incomplete(run_id, r, report):
+            return
 
         for p in problems:
             self.store.set_problem(run_id, p.slug, stage=ProblemStage.AUDITED,
@@ -714,10 +716,15 @@ class ElectiCodeLane:
                       report: LaneReport) -> bool:
         """Log the limits verdict; fail the run if any limit did not land.
 
-        A wrong limit is not a gap the operator can close afterwards — both fields
-        are read-only on the platform, derived from the imported package — so the
-        only fix is a corrected re-import. That makes it a failure rather than
-        something to note and continue past.
+        A wrong limit is not a gap this run can close afterwards. The values arrive
+        with the imported package and no tool Maestro drives can set them, so the
+        only fix available today is a corrected re-import. That makes it a failure
+        rather than something to note and continue past.
+
+        The platform itself *does* have a way to set both; it is simply not exposed
+        by any Scraper command yet. When it is, this stops being terminal and
+        becomes a repair — see the limits section of `FROM_MAESTRO.md` in the
+        Scraper repo for the shape that was asked for.
         """
         try:
             m = manifest.load(Path(set_dir))
@@ -730,8 +737,8 @@ class ElectiCodeLane:
         if bad := errors(findings):
             self._fail(run_id, report,
                        f"{len(bad)} problem(s) carry the wrong limits on the platform; "
-                       "the fields are read-only there, so only a corrected re-import "
-                       "fixes it")
+                       "nothing Maestro drives can set them, so only a corrected "
+                       "re-import fixes it today")
             return True
         return False
 
@@ -754,6 +761,43 @@ class ElectiCodeLane:
                        "they would not be visible to the divisions this run targeted")
             return True
         return False
+
+    def _audit_incomplete(self, run_id: int, r: Result, report: LaneReport) -> bool:
+        """Refuse to call a run done when the audit did not run every check.
+
+        `report audit --char` exits **0** when it skips a check — correctly, since
+        nothing it looked at was wrong. It reports the skip in `skipped` and lists
+        what it did in `checks_run`, deliberately machine-visible rather than
+        stderr-only, precisely so a caller cannot mistake one for the other.
+
+        Reading it closes the last link in a chain that otherwise ends in silence:
+        divisions requested → catalog-sourced scrape → no `division_access` on any
+        row → division check skipped → audit exits 0 → run marked DONE, with the
+        grant never verified. `_needs_paged_scrape` is meant to prevent that, but
+        that is one boolean standing between an operator and a false pass, and the
+        tool is willing to state the fact outright.
+        """
+        data = r.data if isinstance(r.data, dict) else {}
+        want = {"difficulty", "tags"} | ({"division"} if self.divisions else set())
+
+        if "checks_run" not in data:
+            # An older tool that does not say. Not a block — it may well have run
+            # everything — but it must not read as confirmation either.
+            self.store.log(run_id, "warn",
+                           "the audit did not report which checks it ran, so this pass "
+                           "confirms only that nothing it looked at was wrong")
+            return False
+
+        missing = sorted(want - set(data.get("checks_run") or []))
+        if not missing:
+            return False
+        skipped = ", ".join(data.get("skipped") or []) or "not reported"
+        self.store.block(run_id, BlockReason.AWAITING_APPROVAL,
+                         f"the audit passed but did not run every check — {', '.join(missing)} "
+                         f"never ran (skipped: {skipped}). Exit 0 here means nothing it "
+                         f"looked at was wrong, not that the batch is correct")
+        report.blocked = BlockReason.AWAITING_APPROVAL
+        return True
 
     @staticmethod
     def _audit_summary(r: Result) -> str:
