@@ -180,6 +180,23 @@ class PolygonLane:
             if int(round(float(sent) * scale)) != int(got):
                 return (f"{label}: Maestro sent {int(round(float(sent) * scale))} but the "
                         f"import applied {int(got)} — the package would carry the wrong one")
+
+        # Where the applied value *came from*, not just what it was. The Middleman
+        # can now take limits from a form field, an uploaded manifest, or its own
+        # default, and reports which — precisely so a fallback cannot be mistaken
+        # for an explicit value.
+        #
+        # Maestro always sends both form fields when the manifest has them, so
+        # anything but `form` there means the send did not arrive and the right
+        # number was reached by luck. That is worth catching while it is still
+        # true, because the luck runs out the first time the manifest and the
+        # form field disagree.
+        source = entry.get("limitsSource")
+        sent_both = want.get("time_limit_s") is not None and want.get("memory_limit_mb") is not None
+        if source and sent_both and source != "form":
+            return (f"the import took its limits from {source!r}, not from the fields "
+                    f"Maestro sent — the values happen to match, but the send did not "
+                    f"take, so the next set where they differ would import wrong")
         return None
 
     def _limits(self, run_id: int, set_dir: Path, slug: str) -> dict:

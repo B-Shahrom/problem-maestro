@@ -24,7 +24,7 @@ def _scraper(tmp_path, name="scraper", *, capable=True):
                                 'pu.add_argument("--json", action="store_true")'],
         "problem_scraper.py": ['sub.add_parser("problems")', 'ps.add_argument("--from-catalog")'],
         "batch.py": ['sub.add_parser("run")', 'pr.add_argument("--tags-mode")',
-                     'pr.add_argument("--skip")', 'pr.add_argument("--json")'],
+                     'pr.add_argument("--skip")', 'pr.add_argument("--json")', '{"key": "limits"}'],
         "report.py": ['sub.add_parser(\n        "audit")', 'pa.add_argument("--char")'],
     }
     repo = tmp_path / name

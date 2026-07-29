@@ -251,3 +251,32 @@ def test_maestro_canonicalises_names_the_same_way_the_scraper_does():
         theirs, their_unknown = division_access._normalize_divisions([probe])
         assert mine == theirs, probe
         assert bool(my_unknown) == bool(their_unknown), probe
+
+
+def test_maestro_knows_every_stage_the_chore_runner_can_plan():
+    """`_STAGE_KEYS` is Maestro's model of `batch run`'s plan; `STAGE_KEYS` is the
+    plan. A key Maestro cannot name is never skipped on a resume — safe, but it
+    means a chore chain restarts from the top forever, and silently.
+
+    Pinned rather than copied: `limits` arrived with T7 and this is what says so.
+    """
+    from maestro.electicode_lane import _REPLAYABLE, _STAGE_KEYS
+
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import batch
+
+    theirs = set(batch.STAGE_KEYS)
+    assert set(_STAGE_KEYS.values()) == theirs
+    assert set(_REPLAYABLE) == theirs, (
+        "every stage needs a replay verdict — an unrecorded one defaults to "
+        "not-retryable, which stops a run that could have continued")
+
+
+def test_the_limits_stage_is_really_declarative():
+    """Maestro marks it replayable, which is only safe if a repeat converges."""
+    from maestro.electicode_lane import _REPLAYABLE
+
+    assert _REPLAYABLE["limits"] is True
+    source = (REPO / "problem_editor.py").read_text(encoding="utf-8")
+    assert "--time-limit" in source and "--memory-limit" in source

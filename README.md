@@ -125,7 +125,7 @@ reported as killed rather than as a tool that failed.
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, set its own divisions/targets/list |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 473 tests, no external services required.
+`python -m pytest` — 487 tests, no external services required.
 
 Four of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of

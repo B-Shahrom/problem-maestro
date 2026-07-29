@@ -176,6 +176,7 @@ _STAGE_KEYS = {
     "translate": "translate",
     "metadata": "metadata",
     "custom": "custom",
+    "limits": "limits",
     "division": "division",
     "list add": "list-add",
     "list reorder": "list-reorder",
@@ -189,6 +190,7 @@ _REPLAYABLE = {
     "translate": True,     # re-translates and re-saves; nothing accumulates
     "metadata": None,      # → depends on tags_mode
     "custom": False,       # --category-prepend appends without de-duping
+    "limits": True,        # declarative: fills the field, reads it back, confirms
     "division": True,      # declarative: set to exactly this set, verify, done
     "list-add": False,     # de-dupes slugs against row titles, so almost never
     "list-reorder": True,  # a completed reorder plans no moves

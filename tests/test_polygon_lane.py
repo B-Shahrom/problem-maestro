@@ -332,3 +332,52 @@ def test_an_older_middleman_without_the_field_is_not_a_finding(lane):
     ln, _ = build({s: [READY(s)] for s in SLUGS})
     drive(ln, run_id)
     assert all(p.status is ProblemStatus.OK for p in store.active(run_id))
+
+
+# ------------------------------------- where the limits came from, not just what
+
+
+def _applied(script, **fields):
+    """Stamp every problem entry in a scripted body with the given fields."""
+    for bodies in script.values():
+        for b in bodies:
+            for e in b["problems"]:
+                e.update(fields)
+    return script
+
+
+def test_a_limit_that_matched_by_luck_is_still_caught(lane):
+    """The Middleman can now take limits from a form field, an uploaded manifest
+    or its own default, and says which. Maestro always sends both form fields, so
+    anything else means the send did not take — and the values agreeing is luck
+    that runs out the first time the two sources differ.
+    """
+    store, run_id, build = lane
+    script = _applied({s: [READY(s)] for s in SLUGS},
+                      appliedTimeLimit=1000, appliedMemoryLimit=256,
+                      limitsSource="manifest")
+    ln, _ = build(script)
+    drive(ln, run_id)
+
+    bad = [p for p in store.problems(run_id) if p.status is ProblemStatus.QUARANTINED]
+    assert bad, "a limit reached by fallback was accepted as an explicit send"
+    assert "'manifest'" in bad[0].error and "did not take" in bad[0].error
+
+
+def test_the_expected_source_passes(lane):
+    store, run_id, build = lane
+    script = _applied({s: [READY(s)] for s in SLUGS},
+                      appliedTimeLimit=1000, appliedMemoryLimit=256, limitsSource="form")
+    ln, _ = build(script)
+    drive(ln, run_id)
+    assert all(p.status is ProblemStatus.OK for p in store.active(run_id))
+
+
+def test_a_middleman_that_does_not_report_the_source_is_not_a_finding(lane):
+    """Absent means "this build doesn't say", not "it came from the wrong place"."""
+    store, run_id, build = lane
+    script = _applied({s: [READY(s)] for s in SLUGS},
+                      appliedTimeLimit=1000, appliedMemoryLimit=256)
+    ln, _ = build(script)
+    drive(ln, run_id)
+    assert all(p.status is ProblemStatus.OK for p in store.active(run_id))

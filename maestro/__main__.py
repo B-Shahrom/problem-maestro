@@ -157,7 +157,8 @@ REQUIRED_CAPABILITIES: dict[str, list[tuple[str, str, str]]] = {
     "batch.py": [("the `run` subcommand", "Phase 1", r'add_parser\(\s*"run"'),
                  ("`run --tags-mode`", "Phase 1", r'"--tags-mode"'),
                  ("`run --skip`", "priority 8", r'"--skip"'),
-                 ("`run --json`", "priority 6", r'"--json"')],
+                 ("`run --json`", "priority 6", r'"--json"'),
+                 ("the `limits` stage", "T7", r'"limits":\s*"limits"|"key":\s*"limits"')],
     "report.py": [("the `audit` subcommand", "Phase 1", r'add_parser\(\s*"audit"'),
                   ("`audit --char`", "priority 5", r'"--char"')],
 }
