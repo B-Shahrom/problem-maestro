@@ -195,7 +195,18 @@ _REPLAYABLE = {
 }
 
 
-def stage_key(name: str) -> str | None:
+def stage_key(name: str, reported: str | None = None) -> str | None:
+    """The `--skip` key for a stage, from the event that reported it.
+
+    `batch run` now puts `key` on its own item events, which is the authoritative
+    answer and needs no mapping at all. `_STAGE_KEYS` stays as the fallback for a
+    checkout that predates it — and as the thing that keeps the failure mode safe
+    either way: a stage neither source can name yields `None`, and a stage Maestro
+    cannot name it also will not skip on a resume. Re-running a stage costs time;
+    skipping one that never ran costs correctness.
+    """
+    if reported and reported.strip():
+        return reported.strip()
     for prefix, key in _STAGE_KEYS.items():
         if name == prefix or name.startswith(prefix + " ("):
             return key
@@ -215,7 +226,7 @@ def stage_progress(evts: list[dict] | None) -> tuple[list[str], str | None]:
     for e in evts or []:
         if e.get("event") != "item":
             continue
-        key = stage_key((e.get("id") or "").strip())
+        key = stage_key((e.get("id") or "").strip(), e.get("key"))
         if e.get("ok"):
             if key:
                 done.append(key)
@@ -673,12 +684,29 @@ class ElectiCodeLane:
         run = self.store.get_run(run_id)
         assert run is not None
         wanted = self.divisions_for(run)
-        paged = self._needs_paged_scrape(run)
-        scrape = self.client.scrape(self.artefact(run_id, "catalog-after.json"),
-                                    from_catalog=not paged,
-                                    progress=self._say(run_id, "catalog scrape"
-                                                       + ("" if paged else " (1 page load)")))
+
+        # The catalog first, always. One page load, and the only source that
+        # carries the limits — the paged table has no limit columns at all.
+        # Everything the chores set is in it too, so for a batch with no division
+        # claim it is the whole story.
+        catalog = self.client.scrape(self.artefact(run_id, "catalog-after.json"),
+                                     from_catalog=True,
+                                     progress=self._say(run_id, "catalog scrape (1 page load)"))
         report.ran.append("scrape")
+        if not catalog.ok:
+            self._setback(run_id, catalog, report, "post-chore scrape")
+            return
+
+        # …and the paged table as well when there is a division grant to verify,
+        # because the catalog structurally has no `division_access`. The two
+        # sources are complementary, not ranked: neither alone answers both
+        # questions. ~41 loads on top of the 1, taken only when they buy something.
+        scrape = catalog
+        if wanted:
+            scrape = self.client.scrape(self.artefact(run_id, "catalog-paged.json"),
+                                        from_catalog=False,
+                                        progress=self._say(run_id, "paged scrape (divisions)"))
+            report.ran.append("scrape:paged")
         if not scrape.ok:
             self._setback(run_id, scrape, report, "post-chore scrape")
             return
@@ -695,12 +723,16 @@ class ElectiCodeLane:
         # Maestro's own checks, both for the same reason: `report audit --char`
         # does not compare limits at all, and it silently skips the division check
         # in exactly the state that most needs it (see `divisions_landed`).
-        if self._limits_wrong(run_id, run.set_dir, scrape.data or [], report):
+        # Each check reads the source that actually carries its field. Handing
+        # both the same rows is how the limits silently stopped being verifiable
+        # for exactly the runs that granted divisions.
+        if self._limits_wrong(run_id, run.set_dir, catalog.data or [], report):
             return
         if self._divisions_wrong(run_id, wanted, scrape.data or [], problems, report):
             return
 
-        r = self.client.audit(self.artefact(run_id, "catalog-after.json"), path,
+        r = self.client.audit(self.artefact(run_id, "catalog-paged.json" if wanted
+                                            else "catalog-after.json"), path,
                               self.artefact(run_id, "audit.json"),
                               divisions=wanted,
                               progress=self._say(run_id, "audit"))

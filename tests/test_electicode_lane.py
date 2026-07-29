@@ -87,14 +87,27 @@ class FakeScraper:
         return self.apply_rc, ndjson, ""
 
     def _problem_scraper(self, argv):
+        """The two sources carry *different columns*, exactly as the real ones do.
+
+        The flight-payload catalog has the limits and no `division_access`; the
+        paged table has `division_access` and no limit columns. A fake that
+        returned the same rows for both would make every "which source did this
+        check read" test vacuous — and that is precisely the bug worth catching,
+        since handing both checks the same rows looks identical until one of the
+        two fields is missing.
+        """
+        from_catalog = "--from-catalog" in argv
         slugs = self.catalog_slugs if self.catalog_slugs is not None else self.uploaded
         rows = []
         for s in slugs:
             row = {"s3_id": s, "name": self.catalog_names.get(s, TITLES.get(s, s)),
-                   "difficulty": "Easy", "category": "arrays", "division_access": self.division_access}
-            if self.emit_limits:
-                tl, ml = self.catalog_limits.get(s, (1000, 262144))
-                row["time_limit_ms"], row["memory_limit_kb"] = tl, ml
+                   "difficulty": "Easy", "category": "arrays"}
+            if from_catalog:
+                if self.emit_limits:
+                    tl, ml = self.catalog_limits.get(s, (1000, 262144))
+                    row["time_limit_ms"], row["memory_limit_kb"] = tl, ml
+            else:
+                row["division_access"] = self.division_access
             rows.append(row)
         Path(self._opt(argv, "--output")).write_text(json.dumps(rows), encoding="utf-8")
         return self.scrape_rc, "", ""
@@ -715,3 +728,99 @@ def test_a_complete_audit_still_reaches_done_with_divisions_configured(lane):
     l.divisions = "Electi"
     _drive(l, store, run_id)
     assert store.get_run(run_id).stage is RunStage.DONE
+
+
+# ------------------------------- the two scrape sources, which are not ranked
+
+
+def _scrape_calls(fake):
+    return [a for a in fake.calls if "problem_scraper.py" in a[1]]
+
+
+def test_the_audit_reads_the_catalog_even_when_it_also_pages(lane):
+    """The catalog is the only source with the limits; the paged table is the
+    only source with division_access. A run granting divisions needs both."""
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    _drive(l, store, run_id)
+
+    audits = [a for a in _scrape_calls(fake) if "catalog-after" in " ".join(a)
+              or "catalog-paged" in " ".join(a)]
+    catalog = [a for a in audits if "--from-catalog" in a]
+    paged = [a for a in audits if "--from-catalog" not in a]
+    assert catalog, "the limits source was never read"
+    assert paged, "the division source was never read"
+
+
+def test_a_batch_with_no_divisions_pages_nothing(lane):
+    """~41 page loads that would buy nothing: everything stage 8 reads is in the
+    one-load catalog once there is no division claim to verify."""
+    l, store, fake, run_id = lane
+    l.divisions = ""
+    _drive(l, store, run_id)
+    after = [a for a in _scrape_calls(fake) if "catalog-after" in " ".join(a)]
+    assert after and all("--from-catalog" in a for a in after)
+    assert not [a for a in _scrape_calls(fake) if "catalog-paged" in " ".join(a)]
+
+
+def test_the_audit_is_handed_the_file_that_carries_division_access(lane):
+    """`report audit --char` skips its division check on catalog-sourced input,
+    so a run with divisions must hand it the paged file or the check never runs."""
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    _drive(l, store, run_id)
+    (report_call,) = [a for a in fake.calls if "report.py" in a[1]]
+    assert "catalog-paged.json" in " ".join(report_call)
+
+
+def test_the_limits_are_read_from_the_catalog_not_the_paged_rows(lane):
+    """The mutation that survived until the fake told the two sources apart.
+
+    With divisions set, the paged scrape is the one handed to the audit — and it
+    has no limit columns. A limits check reading *those* rows finds nothing to
+    compare and reports L-2 forever, for exactly the runs that granted divisions.
+    """
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    fake.emit_limits = True
+    _drive(l, store, run_id)
+
+    assert store.get_run(run_id).stage is RunStage.DONE
+    notes = [e["message"] for e in store.events(run_id, limit=999)]
+    assert not [n for n in notes if "L-2" in n], \
+        "the limits check read rows that structurally cannot carry limits"
+
+
+def test_a_wrong_limit_still_fails_the_run_when_divisions_are_set(lane):
+    """…and reading the right source has to keep finding real faults."""
+    l, store, fake, run_id = lane
+    l.divisions = "Electi"
+    fake.emit_limits = True
+    fake.catalog_limits = {SLUGS[0]: (5000, 262144)}
+    _drive(l, store, run_id)
+
+    assert store.get_run(run_id).status is RunStatus.FAILED
+    assert any("L-1" in e["message"] for e in store.events(run_id, limit=999))
+
+
+def test_a_stage_reporting_its_own_key_is_believed_over_the_name_map():
+    """`batch run` now puts `key` on its item events. The display-name mapping
+    existed only because it did not, so the reported value wins."""
+    assert stage_key("something entirely new", "list-add") == "list-add"
+    assert stage_key("fixmdx (subtasks)", None) == "fixmdx"       # fallback still works
+    assert stage_key("fixmdx (subtasks)", "") == "fixmdx"         # empty is not an answer
+
+
+def test_an_unnameable_stage_is_still_never_skipped():
+    """The safe direction, under both sources. Re-running a stage costs time;
+    skipping one that never ran costs correctness."""
+    assert stage_key("a stage from the future", None) is None
+
+
+def test_stage_progress_prefers_the_reported_key():
+    done, failed = stage_progress([
+        {"event": "item", "id": "renamed upstream", "key": "metadata", "ok": True},
+        {"event": "item", "id": "also renamed", "key": "division", "ok": False},
+    ])
+    assert done == ["metadata"]
+    assert failed == "division"

@@ -75,9 +75,10 @@ def limits_landed(manifest: dict[str, Any], rows: list[dict[str, Any]]) -> list[
         out.append(Finding(
             "L-2", Severity.WARN,
             "the catalog carried no time_limit_ms/memory_limit_kb, so the authored "
-            "limits could not be verified. Neither scrape source carries the "
-            "fields, so this cannot close until the Scraper exposes them — and "
-            "nothing else checks them"))
+            "limits could not be verified. The flight-payload catalog does carry "
+            "both (`problem_scraper --from-catalog`); a scrape without them is "
+            "either the paged table, which has no limit columns, or a Scraper "
+            "older than the T2 correction. Nothing else checks these"))
     return out
 
 

@@ -291,3 +291,21 @@ def test_no_requested_divisions_means_no_check(set_dir):
 def test_division_matching_ignores_case_and_spacing(set_dir):
     rows = [{"s3_id": s, "division_access": "electi,  Division A+"} for s in SLUGS]
     assert divisions_landed("Electi, Division A+", rows, SLUGS) == []
+
+
+def test_the_catalog_is_what_carries_the_limits(set_dir):
+    """The two scrape sources are complementary, not ranked.
+
+    The catalog has `time_limit_ms`/`memory_limit_kb` and no `division_access`;
+    the paged table has `division_access` and no limit columns. Handing both
+    checks the same rows is how the limits stopped being verifiable for exactly
+    the runs that granted divisions.
+    """
+    m = mf(set_dir)
+    paged_rows = [{"s3_id": p["slug"], "division_access": "Electi"} for p in m["problems"]]
+    f = limits_landed(m, paged_rows)
+    assert [x.check for x in f] == ["L-2"]
+    assert "from-catalog" in f[0].message
+
+    # …and the catalog answers it.
+    assert limits_landed(m, catalog_rows(m)) == []
