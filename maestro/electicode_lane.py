@@ -37,7 +37,7 @@ from pathlib import Path
 from . import characteristics as char
 from . import manifest
 from . import settings as cfg
-from .checks import Severity, errors
+from .checks import Finding, Severity, errors
 from .model import (BlockReason, Problem, ProblemStage, ProblemStatus, RunStage,
                     RunStatus)
 from .preflight import divisions_landed, limits_landed
@@ -249,6 +249,59 @@ def stage_retryable(failed: str | None, tags_mode: str) -> bool:
     if replayable is None:
         return failed == "metadata" and tags_mode != "add"
     return replayable
+
+
+#: `list add` statuses that mean the slug did not join the list.
+_LIST_BAD = {"not_found", "not_confirmed", "error", "refused"}
+
+
+def list_landed(slugs: list[str], evts: list[dict] | None) -> list[Finding]:
+    """Did every slug actually join the contest list? Checks LI-0…LI-3.
+
+    The list step's failure mode used to be invisible: `list add` de-duped a slug
+    by *substring* against existing row titles, so `flows` inside "Max flows" was
+    silently skipped, and already-present tokens were reported only as a count in
+    the `start` event. A batch of five could put three in the list, exit 0, and
+    nobody would find out until a student could not see the problem — the audit
+    does not check list membership at all.
+
+    The Scraper fixed both halves (exact matching for slug-shaped tokens, and an
+    `item` per requested token), and `batch run --json` now forwards `--json` to
+    its children, so those items reach Maestro's stream. This is the other end:
+    diff what came back against what was asked for.
+
+    An empty stream is a finding rather than a pass. It means the child events
+    did not arrive — an older Scraper, or `--json` not forwarded — and "the list
+    could not be verified" must not read the same as "the list is correct".
+    """
+    items = [e for e in evts or []
+             if e.get("event") == "item" and e.get("tool") == "list" and e.get("op") == "add"]
+    if not items:
+        return [Finding("LI-0", Severity.WARN,
+                        "the chore run reported no per-slug list events, so list membership "
+                        "could not be verified — the step may have added nothing at all")]
+
+    by_id = {str(e.get("id", "")).strip(): e for e in items}
+    out: list[Finding] = []
+    for slug in slugs:
+        e = by_id.get(slug)
+        if e is None:
+            out.append(Finding("LI-1", Severity.ERROR,
+                               "the list step reported no outcome for this slug, so it "
+                               "cannot be confirmed to be in the list", slug))
+            continue
+        status = str(e.get("status") or "").strip().lower()
+        if status in _LIST_BAD or e.get("ok") is False:
+            out.append(Finding("LI-2", Severity.ERROR,
+                               f"did not join the list ({status or 'reported not ok'})", slug))
+        elif status == "already":
+            # De-dupe now matches a slug against a whole title, which a real title
+            # essentially never is. So this is not a failure, but on a freshly
+            # uploaded set it is unexpected enough to say out loud.
+            out.append(Finding("LI-3", Severity.WARN,
+                               "was skipped as already in the list — expected for a "
+                               "re-run, surprising for a set uploaded by this run", slug))
+    return out
 
 
 def _did_nothing(evts: list[dict] | None) -> str | None:
@@ -669,6 +722,22 @@ class ElectiCodeLane:
                 # built to catch: work that reports success and did not happen.
                 self._fail(run_id, report, f"the {group.name} group {noop}")
                 return
+
+            # The list step is the one chore whose failure the audit cannot see —
+            # nothing downstream checks contest membership. Its per-slug events
+            # only reach here at all because `batch run --json` forwards `--json`
+            # to its children, so an empty stream is reported rather than read as
+            # a pass.
+            if self.setting_for(run, "list_url"):
+                found = list_landed(group.slugs, r.data)
+                for f in found:
+                    self.store.log(run_id, "error" if f.severity is Severity.ERROR else "warn",
+                                   f"{f.check}: {f.message}", slug=f.slug)
+                if bad := errors(found):
+                    self._fail(run_id, report,
+                               f"{len(bad)} problem(s) did not join the contest list — they "
+                               f"are on the platform but not in the list this batch targeted")
+                    return
 
             for slug in group.slugs:
                 self.store.set_problem(run_id, slug, stage=ProblemStage.CHORED,

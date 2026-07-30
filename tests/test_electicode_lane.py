@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pytest
 
+from maestro.checks import Severity, errors
 from maestro.electicode_lane import (RETRY_CAP, ChoreGroup, ElectiCodeLane, chore_groups,
-                                     stage_key, stage_progress, stage_retryable)
+                                     list_landed, stage_key, stage_progress,
+                                     stage_retryable)
 from maestro.model import (BlockReason, Problem, ProblemSeed, ProblemStage,
                            ProblemStatus, RunStage, RunStatus)
 from maestro.scraper import ScraperClient
@@ -38,6 +40,7 @@ class FakeScraper:
         self.fail_at = "division"             # which stage stops on a non-zero rc
         self.audit_rc = 0
         self.audit_extra: dict = {}
+        self.list_items: dict | None = None
         self.exists: set[str] = set()
         self.overwrite_names: dict[str, str] = {}
         self.catalog_slugs: list[str] | None = None      # None → every uploaded slug
@@ -128,6 +131,14 @@ class FakeScraper:
             out.append({"event": "item", "tool": "batch", "op": "run", "id": name,
                         "ok": ok, "status": "ok" if ok else "failed",
                         "detail": "exit 0" if ok else "exit 2"})
+            # `batch run --json` forwards --json to json-capable children, whose
+            # per-item events land on the same stdout. Reproduced here because
+            # that interleaving is what the list-membership check reads.
+            if ok and key == "list-add" and self.list_items is not None:
+                for slug, status in self.list_items.items():
+                    out.append({"event": "item", "tool": "list", "op": "add",
+                                "id": slug, "ok": status not in ("not_found", "error"),
+                                "status": status})
             if not ok:
                 break
         return rc, "\n".join(json.dumps(o) for o in out) + "\n", "step failed\n"
@@ -824,3 +835,67 @@ def test_stage_progress_prefers_the_reported_key():
     ])
     assert done == ["metadata"]
     assert failed == "division"
+
+
+# ------------------------------------- did the problems actually join the list
+
+
+def _list_item(slug, status="added", ok=True):
+    return {"event": "item", "tool": "list", "op": "add", "id": slug, "ok": ok,
+            "status": status}
+
+
+def test_a_slug_the_list_step_never_mentioned_is_an_error():
+    """The de-dupe used to skip a slug silently and the audit never looks at list
+    membership, so this is the only place it can be caught."""
+    found = list_landed(["a", "b"], [_list_item("a")])
+    assert [(f.check, f.slug) for f in errors(found)] == [("LI-1", "b")]
+
+
+def test_a_slug_that_did_not_join_is_an_error():
+    found = list_landed(["a"], [_list_item("a", "not_found", ok=False)])
+    assert [f.check for f in errors(found)] == ["LI-2"]
+    assert "not_found" in found[0].message
+
+
+def test_already_present_warns_rather_than_fails():
+    """Expected on a re-run; surprising for a set this run just uploaded, since
+    the de-dupe matches a slug against a whole title."""
+    found = list_landed(["a"], [_list_item("a", "already")])
+    assert [f.severity for f in found] == [Severity.WARN]
+    assert not errors(found)
+
+
+def test_a_clean_list_step_says_nothing():
+    assert list_landed(["a", "b"], [_list_item("a"), _list_item("b")]) == []
+
+
+def test_an_absent_event_stream_is_reported_rather_than_passed():
+    """No items means the child events did not arrive, not that the list is fine."""
+    found = list_landed(["a"], [{"event": "item", "tool": "batch", "op": "run",
+                                 "id": "list add", "key": "list-add", "ok": True}])
+    assert [f.check for f in found] == ["LI-0"]
+    assert "could not be verified" in found[0].message
+
+
+def test_a_quietly_skipped_problem_fails_the_run(lane):
+    """End to end: the chore stage reads the stream and refuses to advance."""
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.chore_plan = [("metadata", "metadata"), ("list add", "list-add")]
+    fake.list_items = {SLUGS[0]: "added"}          # the second slug is never mentioned
+    _drive(l, store, run_id)
+
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "did not join the contest list" in run.error
+    assert any("LI-1" in e["message"] for e in store.events(run_id, limit=999))
+
+
+def test_a_list_step_that_reported_everything_lets_the_run_continue(lane):
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.chore_plan = [("metadata", "metadata"), ("list add", "list-add")]
+    fake.list_items = {s: "added" for s in SLUGS}
+    _drive(l, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE

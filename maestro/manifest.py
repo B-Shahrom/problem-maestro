@@ -213,7 +213,9 @@ def validate(set_dir: str | Path, *, extra_tags: set[str] | None = None) -> list
         # failing its own intended solution.
         if measured >= tl:
             err("M-16", f"the reference solution's measured worst case ({measured:g}s) is not "
-                        f"inside its own time limit ({tl:g}s) — the intended solution TLEs", slug)
+                        f"inside its own time limit ({tl:g}s) — the intended solution TLEs. "
+                        f"This is the author's own machine; the platform's is a different one, "
+                        f"so it can only be worse", slug)
         elif measured * 2 > tl:
             warn("M-16", f"measured worst case {measured:g}s against a {tl:g}s limit is only "
                          f"{tl / measured:.1f}x margin; the spec's own example targets 2.5x, and "
