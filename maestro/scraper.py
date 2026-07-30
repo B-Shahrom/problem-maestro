@@ -387,7 +387,7 @@ def run_streamed(argv: list[str], timeout: float,
 #: run until this was found.
 STATEFUL_TOOLS = frozenset({
     "problem_uploader.py", "problem_scraper.py", "contest_scraper.py",
-    "batch.py", "problem_editor.py",
+    "batch.py", "problem_editor.py", "list_editor.py",
 })
 
 
@@ -530,6 +530,28 @@ class ScraperClient:
         r.data = self._read_json(Path(output))
         return r
 
+    # ----------------------------------------------------------------- list
+
+    def list_rows(self, url: str, output: str | Path, *,
+                  progress: OnLine | None = None) -> Result:
+        """The titles currently in a contest list, in order.
+
+        Read rather than inferred. `list add`'s own report cannot be trusted in
+        either direction: a live run reported "Added 13/20" while the list grew
+        by 15, and on the next run reported sixteen already-present problems as
+        "not found in the modal" — which is what the modal correctly says about a
+        problem that is *already in the list*.
+
+        Rows carry titles only, no slug, so the caller compares against the
+        authored titles it already holds. That is enough to answer the only
+        question that matters: is this problem in the list or not.
+        """
+        r = self._run("list_editor.py", "show", "--url", url,
+                      "--output", str(Path(output).resolve()),
+                      timeout=600.0, progress=progress)
+        r.data = list_titles(self._read_json(Path(output)))
+        return r
+
     # --------------------------------------------------------------- chores
 
     def chores(self, char: str | Path, *, tags_mode: str, apply: bool = False,
@@ -590,6 +612,19 @@ def catalog(data: Any) -> list[dict]:
         rows = data.get("problems")
         if isinstance(rows, list):
             return [r for r in rows if isinstance(r, dict)]
+    return []
+
+
+def list_titles(data: Any) -> list[str]:
+    """The row titles from a `list_editor show --output` payload.
+
+    `{url, kind, section, count, problems: [title, …]}` — `problems` is a list of
+    strings, not objects, because the rows expose no identifier beyond their text.
+    """
+    if isinstance(data, dict):
+        rows = data.get("problems")
+        if isinstance(rows, list):
+            return [str(t).strip() for t in rows if str(t).strip()]
     return []
 
 

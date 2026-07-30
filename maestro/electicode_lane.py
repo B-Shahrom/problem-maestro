@@ -304,6 +304,36 @@ def list_landed(slugs: list[str], evts: list[dict] | None) -> list[Finding]:
     return out
 
 
+def list_membership(expected: dict[str, str], rows: list[str]) -> list[Finding]:
+    """Is each problem actually in the contest list? Checks LM-1…LM-2.
+
+    `expected` maps slug → authored title; `rows` is what `list show` reports,
+    which is titles only.
+
+    This exists because `list add`'s self-report is wrong in **both** directions,
+    which a live run showed on one page of output: it said "Added 13/20" while
+    the list grew by 15, and on the next run called sixteen already-present
+    problems "not found in the modal" — the modal's correct answer for a problem
+    that is already in the list.
+
+    A report that under-counts *and* over-reports failure is not a source of
+    truth about anything. Reading the list is, and it costs one page load.
+    """
+    if not expected:
+        return []
+    if not rows:
+        return [Finding("LM-2", Severity.WARN,
+                        "the contest list read back empty, so membership could not be "
+                        "confirmed — an empty list, or a page that did not load")]
+
+    have = {t.strip().lower() for t in rows}
+    return [Finding("LM-1", Severity.ERROR,
+                    f"not in the contest list (looked for the authored title "
+                    f"{title!r} among {len(rows)} row(s))", slug)
+            for slug, title in sorted(expected.items())
+            if title.strip() and title.strip().lower() not in have]
+
+
 def _did_nothing(evts: list[dict] | None) -> str | None:
     """Read a `batch run --json` stream for a success that applied nothing.
 
@@ -801,6 +831,8 @@ class ElectiCodeLane:
             return
         if self._divisions_wrong(run_id, wanted, scrape.data or [], problems, report):
             return
+        if self._list_wrong(run_id, run, parsed, problems, report):
+            return
 
         r = self.client.audit(self.artefact(run_id, "catalog-paged.json" if wanted
                                             else "catalog-after.json"), path,
@@ -858,6 +890,49 @@ class ElectiCodeLane:
                        f"{len(bad)} problem(s) carry the wrong limits on the platform; "
                        "nothing Maestro drives can set them, so only a corrected "
                        "re-import fixes it today")
+            return True
+        return False
+
+    def _list_wrong(self, run_id: int, run, parsed, problems: list[Problem],
+                    report: LaneReport) -> bool:
+        """Read the contest list back and check every problem is in it.
+
+        At stage 8 rather than at the chores, deliberately: by here the list has
+        settled, which matters because the add step's confirmation reads too
+        early — a live run reported five problems `not_confirmed` that had in
+        fact landed, and one more appeared between two invocations.
+
+        This is the only check of contest membership anywhere. `report audit
+        --char` does not look at it, so without this a problem can be on the
+        platform, correctly tagged, correctly limited, in the right divisions,
+        and invisible to every student the contest was made for.
+        """
+        url = self.setting_for(run, "list_url")
+        if not url:
+            return False
+
+        titles = {r.slug: r.title for r in parsed.rows}
+        expected = {p.slug: titles.get(p.slug, p.title) for p in problems}
+
+        r = self.client.list_rows(url, self.artefact(run_id, "list-rows.json"),
+                                  progress=self._say(run_id, "list read-back"))
+        report.ran.append("list:show")
+        if not r.ok:
+            # Not a setback: the batch may be perfectly correct and the page
+            # merely unreadable. But it must not pass as verified either.
+            self.store.log(run_id, "warn",
+                           f"could not read the contest list back ({r.reason}), so "
+                           f"membership is unverified")
+            return False
+
+        findings = list_membership(expected, r.data or [])
+        for f in findings:
+            self.store.log(run_id, "error" if f.severity is Severity.ERROR else "warn",
+                           f"{f.check}: {f.message}", slug=f.slug)
+        if bad := errors(findings):
+            self._fail(run_id, report,
+                       f"{len(bad)} problem(s) are not in the contest list — they exist "
+                       f"on the platform but nobody looking at the contest can see them")
             return True
         return False
 

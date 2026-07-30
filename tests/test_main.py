@@ -26,6 +26,7 @@ def _scraper(tmp_path, name="scraper", *, capable=True):
         "batch.py": ['sub.add_parser("run")', 'pr.add_argument("--tags-mode")',
                      'pr.add_argument("--skip")', 'pr.add_argument("--json")', '{"key": "limits"}'],
         "report.py": ['sub.add_parser(\n        "audit")', 'pa.add_argument("--char")'],
+        "list_editor.py": ['sub.add_parser("show")'],
     }
     repo = tmp_path / name
     repo.mkdir(parents=True, exist_ok=True)

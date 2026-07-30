@@ -70,7 +70,7 @@ def load_config(path: str | Path) -> dict:
 #: alternative is a subprocess failing with "can't open file" some minutes into a
 #: run, naming a path the operator has to work backwards from.
 REQUIRED_TOOLS = ("problem_uploader.py", "problem_scraper.py", "contest_scraper.py",
-                  "batch.py", "report.py")
+                  "batch.py", "report.py", "list_editor.py")
 
 
 def check_paths(cfg: dict) -> list[str]:
@@ -159,6 +159,7 @@ REQUIRED_CAPABILITIES: dict[str, list[tuple[str, str, str]]] = {
                  ("`run --skip`", "priority 8", r'"--skip"'),
                  ("`run --json`", "priority 6", r'"--json"'),
                  ("the `limits` stage", "T7", r'"limits":\s*"limits"|"key":\s*"limits"')],
+    "list_editor.py": [("the `show` subcommand", "Phase 1", r'add_parser\(\s*"show"')],
     "report.py": [("the `audit` subcommand", "Phase 1", r'add_parser\(\s*"audit"'),
                   ("`audit --char`", "priority 5", r'"--char"')],
 }

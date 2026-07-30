@@ -284,6 +284,18 @@ CLAUSES: dict[str, Clause] = {
         "Usually nothing — expected when re-running a batch. Surprising for a set "
         "this run just uploaded, since the de-dupe matches a slug against a whole "
         "row title, which a real title essentially never is."),
+    "LM-1": Clause(
+        "Every problem this batch targeted is in the contest list.",
+        "electicode-fields.md (docs/analysis)",
+        "Nothing to fix in the delivery. The problem exists on the platform but is "
+        "not in the list, so nobody looking at the contest can see it. Re-run the "
+        "list step; it is de-dupe-guarded and safe to repeat."),
+    "LM-2": Clause(
+        "The contest list can be read back.",
+        "electicode-fields.md (docs/analysis)",
+        "Nothing to fix. The list read back empty — either it really is empty, or "
+        "the page did not load. Membership is unverified either way, which is not "
+        "the same as verified."),
     "D-1": Clause(
         "Every uploaded problem carries the division access the run asked for.",
         "electicode-fields.md (docs/analysis)",

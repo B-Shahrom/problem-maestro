@@ -5,7 +5,8 @@ import pytest
 
 from maestro.checks import Severity, errors
 from maestro.electicode_lane import (RETRY_CAP, ChoreGroup, ElectiCodeLane, chore_groups,
-                                     list_landed, stage_key, stage_progress,
+                                     list_landed, list_membership, stage_key,
+                                     stage_progress,
                                      stage_retryable)
 from maestro.model import (BlockReason, Problem, ProblemSeed, ProblemStage,
                            ProblemStatus, RunStage, RunStatus)
@@ -41,6 +42,9 @@ class FakeScraper:
         self.audit_rc = 0
         self.audit_extra: dict = {}
         self.list_items: dict | None = None
+        self.list_rows: list[str] | None = None
+        """Titles the contest list reads back. `None` means "everything the run
+        uploaded", which is the correct-outcome case."""
         self.exists: set[str] = set()
         self.overwrite_names: dict[str, str] = {}
         self.catalog_slugs: list[str] | None = None      # None → every uploaded slug
@@ -114,6 +118,19 @@ class FakeScraper:
             rows.append(row)
         Path(self._opt(argv, "--output")).write_text(json.dumps(rows), encoding="utf-8")
         return self.scrape_rc, "", ""
+
+    def _list_editor(self, argv):
+        """`list show` — the contest list's row **titles**, which is all the page
+        exposes. Deliberately not derived from `list_items`: the whole reason
+        Maestro reads this back is that the add step's self-report disagrees with
+        the list in both directions."""
+        rows = self.list_rows if self.list_rows is not None else [
+            TITLES.get(s, s) for s in self.uploaded]
+        Path(self._opt(argv, "--output")).write_text(
+            json.dumps({"url": self._opt(argv, "--url"), "kind": "contest",
+                        "section": "Problems", "count": len(rows), "problems": rows}),
+            encoding="utf-8")
+        return 0, "", ""
 
     def _batch(self, argv):
         """Runs the plan minus --skip, stopping at `fail_at` (--stop-on-error)."""
@@ -899,3 +916,64 @@ def test_a_list_step_that_reported_everything_lets_the_run_continue(lane):
     fake.list_items = {s: "added" for s in SLUGS}
     _drive(l, store, run_id)
     assert store.get_run(run_id).stage is RunStage.DONE
+
+
+# --------------------- reading the list back, because the add step cannot be trusted
+
+
+def test_a_problem_missing_from_the_contest_list_fails_the_run(lane):
+    """The only check of contest membership anywhere. `report audit --char` does
+    not look at it, so without this a problem can be on the platform, correctly
+    tagged and limited, in the right divisions — and invisible to every student
+    the contest was made for.
+    """
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.list_rows = [TITLES[SLUGS[0]]]          # the second never made it
+    _drive(l, store, run_id)
+
+    run = store.get_run(run_id)
+    assert run.status is RunStatus.FAILED
+    assert "not in the contest list" in run.error
+    assert any("LM-1" in e["message"] for e in store.events(run_id, limit=999))
+
+
+def test_a_complete_list_lets_the_run_finish(lane):
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.list_rows = [TITLES[s] for s in SLUGS]
+    _drive(l, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE
+
+
+def test_the_list_is_matched_by_title_not_by_slug(lane):
+    """The bug this exists for: rows carry titles, Maestro asks about slugs, and
+    comparing the two directly can never match."""
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.list_rows = list(SLUGS)                 # slugs where titles belong
+    _drive(l, store, run_id)
+    assert store.get_run(run_id).status is RunStatus.FAILED
+
+
+def test_no_list_url_means_no_read_back(lane):
+    """A batch that targets no list has no membership to verify."""
+    l, store, fake, run_id = lane
+    l.list_url = ""
+    _drive(l, store, run_id)
+    assert store.get_run(run_id).stage is RunStage.DONE
+    assert not [a for a in fake.calls if "list_editor.py" in a[1]]
+
+
+def test_an_unreadable_list_is_reported_rather_than_passed(lane):
+    """The batch may be right and the page merely unreadable — but "could not
+    check" must not read the same as "checked"."""
+    l, store, fake, run_id = lane
+    l.list_url = "https://www.electicode.com/c/9/manage"
+    fake.list_rows = []
+    _drive(l, store, run_id)
+    assert any("LM-2" in e["message"] for e in store.events(run_id, limit=999))
+
+
+def test_membership_is_matched_case_and_space_insensitively():
+    assert list_membership({"a": " Center of the Table "}, ["center of the table"]) == []
