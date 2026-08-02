@@ -321,6 +321,9 @@ PAGE = """<!doctype html>
   #log { white-space: pre-wrap; max-height: 22rem; overflow-y: auto; border: 1px solid var(--line);
          padding: .6rem; margin-top: .8rem; }
   .warn { color: #b80; } .error { color: #d33; }
+  /* The mind's lines are opinions; everything else in this log is a fact.
+     Indented and tinted so the difference survives a fast scroll. */
+  .mind { color: #57a; border-left: 2px solid #57a; padding-left: .5rem; }
   #detail { margin-top: 1.5rem; }
   #err { color: #d33; }
 </style>

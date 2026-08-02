@@ -300,3 +300,65 @@ def test_an_empty_divisions_config_is_a_warning_not_a_refusal(cfg):
     assert check_paths(loaded) == [], "an empty divisions must not block startup"
     assert any("divisions" in w for w in check_warnings(loaded))
     assert main(["--config", str(cfg), "run", "--max-ticks", "1"]) == 0
+
+
+# ------------------------------------------------------------------ the mind
+
+
+def test_the_mind_is_off_by_default_and_that_is_not_a_warning(tmp_path):
+    """An install with no key is a complete install. It must not nag."""
+    warnings = check_warnings(_cfg(tmp_path, divisions="Electi", targets="ru",
+                                   list_url="https://x/manage"))
+    assert not any("mind" in w for w in warnings)
+
+
+def test_a_mind_switched_on_without_a_key_says_so_at_startup(tmp_path, monkeypatch):
+    """The failure this prevents is entirely silent otherwise: stopped runs
+    simply never get read, which looks exactly like a mind with nothing to say."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    warnings = check_warnings(_cfg(tmp_path, mind=True))
+    assert any("$ANTHROPIC_API_KEY" in w for w in warnings)
+
+
+def test_a_typo_in_the_allowlist_is_named_rather_than_ignored(tmp_path):
+    """It already fails closed — `from_config` drops it. But a permission that
+    silently grants nothing reads as a mind that has decided not to act."""
+    warnings = check_warnings(_cfg(tmp_path, mind_may=["resume", "aprove"]))
+    assert any("aprove" in w for w in warnings)
+
+
+def test_allowing_approve_is_called_out(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    warnings = check_warnings(_cfg(tmp_path, mind=True, mind_may=["approve"]))
+    assert any("write to ElectiCode unread" in w for w in warnings)
+
+
+def test_diagnose_dry_run_prints_the_evidence_and_sends_nothing(cfg, capsys):
+    """`--dry-run` works with the mind off on purpose: "what would it see" is a
+    question an operator should be able to answer before deciding to pay."""
+    conf = load_config(cfg)
+    with Store(conf["db"]) as store:
+        run_id = store.create_run("edu-arrays", str(cfg.parent),
+                                  [ProblemSeed(slug=SLUGS[0], idx=1, title="T",
+                                               archive="a.zip")])
+        store.log(run_id, "error", "division set exited 1")
+
+    assert main(["--config", str(cfg), "diagnose", str(run_id), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "division set exited 1" in out
+    assert f"Run {run_id}" in out
+
+
+def test_diagnose_without_a_mind_exits_non_zero_and_says_why(cfg, capsys):
+    conf = load_config(cfg)
+    with Store(conf["db"]) as store:
+        store.create_run("edu-arrays", str(cfg.parent),
+                         [ProblemSeed(slug=SLUGS[0], idx=1, title="T", archive="a.zip")])
+
+    assert main(["--config", str(cfg), "diagnose", "1"]) == 2
+    assert "the mind is off" in capsys.readouterr().err
+
+
+def test_diagnose_names_a_run_that_does_not_exist(cfg, capsys):
+    assert main(["--config", str(cfg), "diagnose", "42", "--dry-run"]) == 1
+    assert "no run 42" in capsys.readouterr().err

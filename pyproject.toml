@@ -7,6 +7,11 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The mind is the only thing here with a runtime dependency, and it is optional
+# for the same reason the Middleman pre-flight is: the pipeline's correctness
+# does not rest on it, so its availability must not gate a run. Installed
+# without it, Maestro runs and says the mind is off.
+mind = ["anthropic>=0.75"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

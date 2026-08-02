@@ -23,6 +23,7 @@ from pathlib import Path
 
 from . import brief as brief_mod
 from . import feedback
+from . import mind
 from . import settings as batch_cfg
 from .dashboard import Dashboard
 from .electicode_lane import ElectiCodeLane
@@ -49,6 +50,12 @@ DEFAULTS: dict = {
     "fixmdx": "subtasks",
     "dashboard_host": "127.0.0.1",
     "dashboard_port": 8787,
+
+    # The mind — off by default, and off is a working install. See `maestro.mind`.
+    "mind": False,
+    "mind_key_env": "ANTHROPIC_API_KEY",
+    "mind_model": mind.MODEL,
+    "mind_may": [],
 }
 
 
@@ -132,6 +139,21 @@ def check_warnings(cfg: dict) -> list[str]:
     if not cfg["list_url"]:
         out.append("`list_url` is empty — problems are added to no contest list unless a "
                    "batch chooses one (`maestro settings <run> --list-url …`).")
+
+    # The mind is optional, but a mind that is *configured and not working* must
+    # not be quiet about it: the symptom is stopped runs simply not being read,
+    # which looks exactly like a mind that had nothing to say.
+    if cfg["mind"] and not (m := mind.from_config(cfg)).on:
+        out.append(f"`mind` is on but no reading is available — {m.why}.")
+    if bad := mind.unknown_actions(cfg):
+        # Fails closed in `from_config`, so this is the only place it surfaces —
+        # and a typo silently granting nothing reads as a mind that never acts.
+        out.append(f"`mind_may` names {', '.join(bad)}, which is not an action, so it "
+                   f"grants nothing. Valid: {', '.join(a.value for a in mind.Action)}.")
+    if cfg["mind"] and mind.Action.APPROVE.value in (cfg["mind_may"] or []):
+        out.append("`mind_may` includes `approve`, so a high-confidence reading can let a "
+                   "run write to ElectiCode unread. Narrower than `apply: true`, which "
+                   "approves everything — but not nothing.")
     return out
 
 
@@ -197,6 +219,8 @@ def build(cfg: dict, *, check: bool = True) -> tuple[Scheduler, Store]:
                        list_url=cfg["list_url"], fixmdx=cfg["fixmdx"]),
         watch_dir=cfg["watch_dir"],
         parser=middleman.parse,
+        mind=mind.from_config(cfg),
+        work_dir=cfg["work_dir"],
     )
     return scheduler, store
 
@@ -251,7 +275,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             cursors[run_id] = r["id"]
             if r["level"] == "debug" and not args.verbose:
                 continue
-            mark = {"error": "[!]", "warn": " ! "}.get(r["level"], "   ")
+            # The mind gets its own mark. Its lines are opinions and the rest are
+            # facts, and an operator scanning a log has to be able to tell which
+            # is which without reading the sentence.
+            mark = {"error": "[!]", "warn": " ! ", "mind": " ~ "}.get(r["level"], "   ")
             where = f" {r['slug']}" if r["slug"] else ""
             print(f"{mark} {run_id}{where}: {r['message']}", file=sys.stderr)
 
@@ -269,6 +296,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"    wrote {path}", file=sys.stderr)
         for item in report.advanced:
             print(f"    {item}", file=sys.stderr)
+        for run_id, action in report.acted:
+            # Louder than a reading, because this one changed something.
+            print(f" ~  {run_id}: the mind {action}d this run", file=sys.stderr)
         for err in report.errors:
             print(f"[!] {err}", file=sys.stderr)
         for run in store.list_runs():
@@ -434,6 +464,49 @@ def cmd_divisions(args: argparse.Namespace) -> int:
     return cmd_settings(args)
 
 
+def cmd_diagnose(args: argparse.Namespace) -> int:
+    """Ask the mind to read one run. Changes nothing, ever.
+
+    Available whatever the run's state, unlike the scheduler's own pass, because
+    an operator asking about a *running* run is asking a real question — they
+    are watching something take too long. The scheduler restricts itself to
+    stopped runs to bound cost, which is a different concern.
+    """
+    cfg = load_config(args.config)
+    m = mind.from_config(cfg)
+    if not m.on and not args.dry_run:
+        print(f"the mind is off — {m.why}", file=sys.stderr)
+        return 2
+
+    with Store(cfg["db"]) as store:
+        try:
+            evidence = mind.gather(store, args.run_id,
+                                   Path(cfg["work_dir"]) / str(args.run_id),
+                                   artefacts=mind.ARTEFACTS)
+        except KeyError:
+            print(f"no run {args.run_id}", file=sys.stderr)
+            return 1
+
+        if args.dry_run:
+            # Exactly the bytes that would be sent, so "what does it see" is
+            # answerable without spending anything — and so the redaction is
+            # inspectable rather than merely asserted in a test.
+            print(evidence.render())
+            return 0
+
+        reading = m.diagnose(evidence)
+        print(reading.render(), file=sys.stderr)
+        if isinstance(reading, mind.Unavailable):
+            store.log(args.run_id, "warn", f"mind: {reading.why}")
+            return 2
+
+        store.log(args.run_id, "mind", reading.render())
+        ok, why = m.may(reading)
+        print(f"\nwould act: {'yes' if ok else 'no'}" + (f" — {why}" if why else ""),
+              file=sys.stderr)
+    return 0
+
+
 def cmd_forget(args: argparse.Namespace) -> int:
     """Delete Maestro's record of a run. Previews unless `--yes`.
 
@@ -583,6 +656,13 @@ def main(argv: list[str] | None = None) -> int:
     p_div.add_argument("--default", action="store_true",
                        help="Clear the choice so the configured default applies again.")
     p_div.set_defaults(func=cmd_divisions)
+
+    p_diag = sub.add_parser("diagnose", help="Ask the mind to read one run. Writes nothing.")
+    p_diag.add_argument("run_id", type=int)
+    p_diag.add_argument("--dry-run", action="store_true",
+                        help="Print the evidence that would be sent, and send nothing. "
+                             "Works with the mind off.")
+    p_diag.set_defaults(func=cmd_diagnose)
 
     p_forget = sub.add_parser("forget", help="Delete Maestro's record of a run.")
     p_forget.add_argument("run_id", type=int)

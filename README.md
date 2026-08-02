@@ -44,6 +44,9 @@ overwrites rather than appends. Those reorder Phase 2 toward correctness before 
 - **`docs/analysis/author-lane.md`** — the half of the pipeline before the watch directory:
   what "talking to the developer" decomposes into, why the authoring actor needs Managed
   Agents rather than the Claude API alone, and why the gate must stay deterministic under it
+- **`docs/analysis/the-mind.md`** — where a model belongs *inside* the orchestrator, what
+  it is allowed to do, and why "deal with problems on its own" turned out to be two
+  different requests with very different answers
 - **`docs/contracts/`** — the problem-developer's authoring contract (output contract,
   characteristics spec, manifest spec, preflight checklist, system prompt, tool spec)
 - **`docs/prompts/`** — the briefs sent to each actor, plus the Phase 2 corrections
@@ -96,12 +99,52 @@ python -m maestro status               # one-shot listing; non-zero if a run wan
 python -m maestro settings 12          # what this batch chose for itself
 python -m maestro settings 12 --divisions "Electi, Division A+" --targets ru,tg,uz
 python -m maestro divisions 12 --set "Electi"   # the one touched every batch
+python -m maestro diagnose 12          # ask the mind why run 12 stopped
+python -m maestro diagnose 12 --dry-run  # …or just see what it would be sent
 python -m maestro forget 12 --yes      # delete Maestro's record of run 12
 ```
 
 `apply` is **off** by default, so a fresh install previews and parks each run at its first
 write. Approve individual runs in the dashboard, or set `apply: true` once you trust it.
 `config.json` is gitignored — it points at the session file and the Middleman.
+
+## The mind
+
+Optional, off by default, and an install without it is a complete install:
+`pip install 'maestro[mind]'`, set `mind: true`, and point `mind_key_env` at the
+environment variable holding an Anthropic key. The config names the *variable*,
+never the value — same rule as every other secret here.
+
+What it does is read the runs that have **stopped**. A parked run's cause is
+usually spread across a log, a set of findings and an artefact, and reading all
+of it at once is the thing a human does and no check can. The reading lands in
+the run's own log marked `mind`, saying what it thinks happened, what to look at
+first, and what evidence it wanted and did not have.
+
+What it does **not** do is accept anything. The gate is unchanged and stays
+deterministic — M-2 compares a sha256, C-4 compares two sets of slugs, and a
+model asked those questions would be right most of the time, which on a checksum
+is indistinguishable from not checking it. The rule the whole design rests on:
+*a model may propose; only a check may accept.*
+
+It can also act, within bounds you set:
+
+| | |
+|---|---|
+| the action vocabulary | four verbs — `wait`, `resume`, `approve`, `escalate` — and every one is something the dashboard already offers a human |
+| `mind_may` | which of them it may take unattended. Defaults to `[]`: propose only |
+| confidence | nothing below `high` is ever acted on, however permissive `mind_may` is |
+| `escalate` | never automated. It is the word for "a human is needed" |
+
+`approve` is the one to think about. It is narrower than `apply: true` — which
+approves every run unread and already exists — but it is not nothing, and
+`maestro check` says so when it is enabled.
+
+A run with no reading always says *why* there is none. "The mind is off", "the
+key is unset", "the transport failed" and "the model declined" are five
+different facts, and none of them may look like a run the mind found nothing
+wrong with. That is the same fail-silent shape as a skipped check reporting
+clean, and it is what most of `test_mind.py` is about.
 
 A stage that drives a browser reports as it goes: each of the Scraper's own progress events
 becomes a line in the run log, and a tool that has gone quiet for 90 seconds says so rather
@@ -128,12 +171,13 @@ reported as killed rather than as a tool that failed.
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: output streams out live, exit codes carry the decision, a killed process is told apart from a failed one, and nothing mutates without `apply=True` |
 | `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent — and read the contest list back rather than believe the step that filled it |
 | `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
+| `maestro/mind.py` | The one place a model belongs on this half: a reading of a stopped run, a closed vocabulary of four actions, and no path by which any of it can accept a delivery |
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, set its own divisions/targets/list |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 500 tests, no external services required.
+`python -m pytest` — 566 tests, no external services required.
 
-Four of the test modules check Maestro against something outside itself, and skip when it is
+Five of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of
 the systems around it, and a test that only checks Maestro against itself cannot see that model
 drifting — the dashboard's delete button once shipped inert with every server-side test green:
@@ -146,6 +190,11 @@ drifting — the dashboard's delete button once shipped inert with every server-
   `--state` being sent to `report.py`, which does not take one, so stage 8 could never have
   succeeded — and stage 8 is the only stage no live run has yet reached
 
+- `test_mind_roundtrip.py` — the one request that leaves the machine, checked against the
+  real SDK's own signature. Every other mind test injects a transport, so none of them can
+  see that call being wrong — and its parameter shapes have moved twice: `output_format`
+  gave way to `output_config.format`, and `thinking.budget_tokens` is now rejected outright
+  by the model this uses. Needs `pip install 'maestro[mind]'`
 - `test_characteristics_roundtrip.py` — the characteristics Maestro renders, parsed back by
   the real `batch.py`, down to the positional tag alignment and the flag that protects
   existing tags

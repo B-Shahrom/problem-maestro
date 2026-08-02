@@ -34,6 +34,7 @@ from pathlib import Path
 from .electicode_lane import ElectiCodeLane
 from .checks import Severity
 from . import feedback
+from . import mind as mind_mod
 from .ingest import Verdict, scan
 from .model import RunStage, RunStatus
 from .polygon_lane import PolygonLane
@@ -96,6 +97,15 @@ class TickReport:
     Only on change. A rejection that repeats every tick writes nothing after the
     first, so an entry here means the folder itself changed.
     """
+    readings: list[tuple[int, str]] = field(default_factory=list)
+    """`(run, one-line verdict)` for every run the mind read this tick.
+
+    Includes the readings that produced no action and the ones that produced no
+    reading at all, because "the mind looked and said escalate" and "the mind
+    could not be reached" are the two facts an operator most needs kept apart.
+    """
+    acted: list[tuple[int, str]] = field(default_factory=list)
+    """`(run, action)` the mind actually took. Empty unless `mind_may` says so."""
 
     @property
     def idle(self) -> bool:
@@ -106,7 +116,7 @@ class TickReport:
         progress the whole time, and calling it idle would mean an operator
         watching the console hears from a live upload once every thirty seconds.
         """
-        return not (self.ingested or self.advanced
+        return not (self.ingested or self.advanced or self.acted
                     or self.electicode is not None or self.electicode_busy)
 
 
@@ -123,6 +133,8 @@ class Scheduler:
         busy_interval: float = BUSY_INTERVAL,
         idle_interval: float = IDLE_INTERVAL,
         feedback_after: int = FEEDBACK_AFTER,
+        mind: mind_mod.Mind | None = None,
+        work_dir: str | Path | None = None,
     ) -> None:
         self.store = store
         self.polygon = polygon
@@ -133,6 +145,15 @@ class Scheduler:
         self.busy_interval = busy_interval
         self.idle_interval = idle_interval
         self.feedback_after = feedback_after
+        self.mind = mind or mind_mod.Mind(None, why="no mind was configured")
+        self.work_dir = Path(work_dir) if work_dir else None
+        self._read: dict[int, str] = {}
+        """Run id → the state stamp last diagnosed, so an unchanged parked run is
+        read once rather than once a minute. In-memory like `_incomplete`: a
+        restart re-reads each stopped run once, which costs one request per
+        parked run and puts the reading back in a log the operator is looking
+        at. The other direction — persisting it — would leave a restarted
+        Maestro silent about the runs it restarted holding."""
         self._incomplete: dict[str, int] = {}
         """Consecutive ticks each folder has been INCOMPLETE. In-memory on
         purpose: a restart re-arms the grace period, which is the right
@@ -156,7 +177,108 @@ class Scheduler:
         # immediately, and making it wait a whole interval for no reason would add
         # up over a batch.
         self._pump_electicode(self._live(_ELECTICODE_STAGES), report)
+        self._diagnose(report)
         return report
+
+    # ------------------------------------------------------------------ mind
+
+    def _diagnose(self, report: TickReport) -> None:
+        """Read the runs that have stopped, at most once per stop.
+
+        Last in the tick on purpose: a run that failed *this* tick is diagnosed
+        with that failure already in its log, and a run the lanes just advanced
+        is not stopped at all. Diagnosing first would read every run one tick
+        stale, which for a stage that logs its own cause is the difference
+        between naming it and guessing.
+
+        Cheap to skip and cheap to leave off. With no mind configured this is a
+        `list_runs` and a return, which the tick already pays for.
+        """
+        if not self.mind.on:
+            return
+        for run in self.store.list_runs():
+            if not mind_mod.wants_reading(run):
+                # Cleared runs forget their stamp, so a run that stops again
+                # later is read again — the second stop is a different fact.
+                self._read.pop(run.id, None)
+                continue
+            if self._read.get(run.id) == self._stamp(run):
+                continue
+            # Stamped before the call as well as after, so a reading that raises
+            # on the way out is not retried on every tick for the same state.
+            self._read[run.id] = self._stamp(run)
+            self._read_one(run, report)
+            self._restamp(run.id)
+
+    def _stamp(self, run) -> str:
+        last = self.store.last_event(run.id)
+        return mind_mod.state_stamp(run, int(last["id"]) if last else 0)
+
+    def _restamp(self, run_id: int) -> None:
+        """Re-stamp from the state the reading left behind.
+
+        The reading is itself written to the event log, so the stamp taken
+        *before* it is already stale by the time it is stored — and a stamp that
+        never matches is no stamp at all. The first version of this re-read
+        every parked run on every tick, forever, and said nothing while doing it.
+        """
+        run = self.store.get_run(run_id)
+        if run is None or not mind_mod.wants_reading(run):
+            self._read.pop(run_id, None)   # it moved; the next stop is a new question
+            return
+        self._read[run_id] = self._stamp(run)
+
+    def _read_one(self, run, report: TickReport) -> None:
+        work = self.work_dir / str(run.id) if self.work_dir else None
+        try:
+            evidence = mind_mod.gather(self.store, run.id, work,
+                                       artefacts=mind_mod.ARTEFACTS)
+        except (KeyError, OSError) as e:
+            report.errors.append(f"run {run.id}: could not assemble evidence ({e})")
+            return
+
+        reading = self.mind.diagnose(evidence)
+        if isinstance(reading, mind_mod.Unavailable):
+            # A warning, not an error: nothing about the run changed, and the
+            # pipeline does not depend on this. But it is written down, because
+            # the alternative is a stopped run that simply never gets read and
+            # looks exactly like one the mind had nothing to say about.
+            self.store.log(run.id, "warn", f"mind: {reading.why}")
+            report.readings.append((run.id, reading.render()))
+            return
+
+        self.store.log(run.id, "mind", reading.render())
+        report.readings.append((run.id, f"{reading.action.value} "
+                                        f"({reading.confidence}) — {reading.summary}"))
+
+        ok, why = self.mind.may(reading)
+        if not ok:
+            self.store.log(run.id, "info", f"mind: not acting — {why}")
+            return
+        self._act(run, reading, report)
+
+    def _act(self, run, reading, report: TickReport) -> None:
+        """Take the one action the operator allowed and the mind was sure of.
+
+        Both actions here are ones the dashboard already exposes to a human, and
+        neither can do anything the run's own gates would refuse — `resume` puts
+        a run back in the queue and the idempotency rules still apply, `approve`
+        opens the same per-run gate the approve button opens. The mind chooses
+        *when*, never *what may happen*.
+        """
+        if reading.action is mind_mod.Action.RESUME:
+            if run.status not in (RunStatus.FAILED, RunStatus.BLOCKED):
+                return
+            self.store.set_run(run.id, status=RunStatus.RUNNING)
+        elif reading.action is mind_mod.Action.APPROVE:
+            if run.approved:
+                return
+            self.store.approve(run.id)
+        else:
+            return  # WAIT is a decision to do nothing, and doing nothing is it
+
+        self.store.log(run.id, "mind", f"acted: {reading.action.value} — {reading.reason}")
+        report.acted.append((run.id, reading.action.value))
 
     def _live(self, stages: tuple[RunStage, ...]) -> list[int]:
         """Run ids at these stages that are still moving, **oldest first**.
@@ -367,6 +489,7 @@ def build(
     divisions: str = "",
     targets: str = "",
     list_url: str = "",
+    mind: mind_mod.Mind | None = None,
 ) -> tuple[Scheduler, Store]:
     """Wire a scheduler from a config. Returns it with the store it owns.
 
@@ -378,5 +501,5 @@ def build(
     electicode = ElectiCodeLane(store, scraper, work_dir, apply=apply,
                                 divisions=divisions, targets=targets, list_url=list_url)
     sched = Scheduler(store, polygon, electicode, watch_dir=watch_dir,
-                      parser=middleman.parse)
+                      parser=middleman.parse, mind=mind, work_dir=work_dir)
     return sched, store
