@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -46,8 +47,8 @@ CALLS = {
 }
 
 
-def _parser(tool: str):
-    """The tool's real `build_parser()`, imported without running it.
+def _module(tool: str):
+    """The tool itself, imported without running it.
 
     The checkout goes on `sys.path` first: the tools import siblings (`paths`,
     `problem_scraper`), and without it every case here skips on a
@@ -68,6 +69,12 @@ def _parser(tool: str):
         if (e.name or "") in {t[:-3] for t in CALLS} or (REPO / f"{e.name}.py").is_file():
             raise
         pytest.skip(f"{tool} needs {e.name}, which is not installed here")
+    return module
+
+
+def _parser(tool: str):
+    """The tool's real `build_parser()`."""
+    module = _module(tool)
     if not hasattr(module, "build_parser"):
         pytest.skip(f"{tool} has no build_parser()")
     return module.build_parser()
@@ -257,6 +264,51 @@ def test_maestro_canonicalises_names_the_same_way_the_scraper_does():
         theirs, their_unknown = division_access._normalize_divisions([probe])
         assert mine == theirs, probe
         assert bool(my_unknown) == bool(their_unknown), probe
+
+
+def test_maestro_offers_exactly_the_languages_the_scraper_accepts():
+    """The same pin as the divisions one, on the other closed vocabulary.
+
+    Divisions had it and translation targets did not, for no reason other than
+    which one was built first. The failure is identical: `translate` exits 1 on
+    a code it does not know, and it does so *inside* the chore chain, after
+    fixmdx and metadata have already run and been paid for.
+
+    Three statements of the vocabulary have to agree, and the third is why this
+    is not one assertion. `_LANG_NAMES` is what Maestro mirrors, `--source`'s
+    argparse choices are what a command line is judged against, and a separate
+    literal inside `cmd_translate` is what actually rejects a bad *target* —
+    argparse never sees that one, so a code can pass the parser and still fail
+    the command.
+    """
+    from maestro import settings as cfg
+
+    editor = _module("problem_editor.py")
+    mine = set(cfg.LANGUAGES)
+
+    assert mine == set(editor._LANG_NAMES), "the mirrored table has drifted"
+
+    parser = editor.build_parser()
+    for code in sorted(mine):
+        # `--source` carries `choices=`, so this is the parser's own judgement
+        # rather than a copy of it.
+        parser.parse_args(["translate", "--source", code, "--targets", code, "--only", "x"])
+
+    # …and the literal `cmd_translate` actually rejects targets against. Read
+    # from the source, the way `REQUIRED_CAPABILITIES` reads its probes: the
+    # bytecode is where this was tried first, and on 3.11 the tuple sits inside a
+    # nested comprehension code object, so the obvious scan found nothing and
+    # passed — a check that cannot fail, in a test written against exactly that.
+    src = (REPO / "problem_editor.py").read_text(encoding="utf-8")
+    literals = re.findall(r"not in \(((?:\s*\"[a-z]{2}\"\s*,?)+)\)", src)
+    assert literals, (
+        "no hard-coded language list found in problem_editor.py. If the target "
+        "check now derives from `_LANG_NAMES`, that is the right fix and this "
+        "assertion should go; if it merely moved, this is the drift it was for")
+    for literal in literals:
+        assert set(re.findall(r"[a-z]{2}", literal)) == mine, (
+            f"a language check lists {literal.strip()} while the vocabulary is "
+            f"{sorted(mine)}")
 
 
 def test_maestro_knows_every_stage_the_chore_runner_can_plan():

@@ -32,9 +32,12 @@ from dataclasses import dataclass
 
 from .divisions import DIVISIONS
 
-#: Statement languages, mirrored from `problem_editor._LANG_NAMES`. `en` is the
-#: translate *source* by default, so it is rarely a target — but the tool accepts
-#: it and Maestro does not second-guess a deliberate choice.
+#: Statement languages, mirrored from `problem_editor._LANG_NAMES` and pinned to
+#: it by `test_scraper_roundtrip.py` — along with `--source`'s argparse choices
+#: and the separate literal `cmd_translate` rejects bad *targets* against, since
+#: all three have to agree and only the first is a table anyone would think to
+#: update. `en` is the translate *source* by default, so it is rarely a target —
+#: but the tool accepts it and Maestro does not second-guess a deliberate choice.
 LANGUAGES = ("en", "ru", "tg", "uz")
 
 
