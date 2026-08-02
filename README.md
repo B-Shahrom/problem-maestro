@@ -66,8 +66,14 @@ The build is complete: a set folder dropped in the watch directory goes through 
 Polygon import/build/download, ElectiCode upload, reconcile, chores and audit without
 intervention, and parks for a human at every point where it should.
 
-What remains on this half is not code — it's the first supervised end-to-end run against
-live services. The procedure for that is `docs/procedures/first-live-run.md`.
+What remains on this half is not code — it's live evidence. The first supervised run
+(`docs/procedures/first-live-run.md`) reached tagged, fixmdx'd, difficulty-set problems on
+ElectiCode; it did not grant division access and never reached a passing stage 8. Everything
+built since to close those — the limits round trip, the two-source scrape, the division
+verdict, the contest-list read-back, per-batch settings — has run only against fakes and
+against the Scraper's own argument parsers. `docs/procedures/second-live-run.md` is the
+procedure for converting that into evidence, written around the hazard that every one of those
+checks is a no-op when its setting is empty.
 
 The half that is *not* built is everything before the watch directory: briefing the author,
 receiving the delivery, and getting a rejected set corrected. Two of those three now exist and
@@ -115,17 +121,17 @@ reported as killed rather than as a tool that failed.
 | `maestro/divisions.py` | The nine division names, mirrored from the Scraper and pinned to it by test |
 | `maestro/settings.py` | The three values a batch chooses for itself — divisions, translation targets, contest list — with the config as the default each falls back to |
 | `maestro/brief.py` | Stage 0: the instruction sent to the author, generated from the constants the gate enforces so the two cannot drift |
-| `maestro/preflight.py` | P-1…P-6: the manifest against what the Middleman's own parser says will import — optional, so ingest still works with the service down |
+| `maestro/preflight.py` | P-1…P-6: the manifest against what the Middleman's own parser says will import — optional, so ingest still works with the service down. Also the far end of the same chain: L-1/L-2 and D-1/D-2, the authored limits and divisions against what the platform ended up with |
 | `maestro/feedback.py` | The author's half of a rejection: every check paired with the contract clause it enforces, and an explicit list of the checks that never ran |
 | `maestro/polygon.py` | Middleman client plus the decision policy layered over its error taxonomy |
 | `maestro/polygon_lane.py` | Stages 3–5: one job per problem, quarantine on verify failure, extract into the upload parent |
 | `maestro/scraper.py` | The Scraper's CLIs as a typed surface: output streams out live, exit codes carry the decision, a killed process is told apart from a failed one, and nothing mutates without `apply=True` |
-| `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent |
+| `maestro/electicode_lane.py` | Stages 6–8: preview before apply, reconcile before chores, retry only what is idempotent — and read the contest list back rather than believe the step that filled it |
 | `maestro/scheduler.py` | The loop: Polygon runs fan out, ElectiCode runs strictly one at a time on a worker thread so a tens-of-minutes chore chain can't block a tick |
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, set its own divisions/targets/list |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 487 tests, no external services required.
+`python -m pytest` — 500 tests, no external services required.
 
 Four of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of

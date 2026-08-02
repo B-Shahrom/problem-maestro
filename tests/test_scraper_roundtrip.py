@@ -239,15 +239,21 @@ def test_maestro_offers_exactly_the_divisions_the_scraper_knows():
 
 
 def test_maestro_canonicalises_names_the_same_way_the_scraper_does():
-    """Case-folding that disagreed would send a name the tool then rejects."""
-    from maestro import divisions as div
+    """Case-folding that disagreed would send a name the tool then rejects.
+
+    Pinned on `settings.normalise`, which is the function the dashboard and the
+    CLI actually call. It used to be pinned on a second copy in `divisions.py`
+    that nothing ran — so the check that existed to catch divergence from the
+    Scraper could not have seen production diverge.
+    """
+    from maestro import settings as cfg
 
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
     import division_access
 
     for probe in ("electi", "ELECTI", " Division A+ ", "tier 3", "Divison A"):
-        mine, my_unknown = div.normalise(probe)
+        mine, my_unknown = cfg.normalise("divisions", probe)
         theirs, their_unknown = division_access._normalize_divisions([probe])
         assert mine == theirs, probe
         assert bool(my_unknown) == bool(their_unknown), probe

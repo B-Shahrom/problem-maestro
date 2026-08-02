@@ -51,28 +51,38 @@ def test_the_nine_names_are_offered_in_the_platform_s_own_order():
     (None, []),
 ])
 def test_names_are_matched_case_insensitively_and_de_duplicated(given, want):
-    names, unknown = div.normalise(given)
+    names, unknown = cfg.normalise("divisions", given)
     assert (names, unknown) == (want, [])
 
 
 def test_an_unknown_name_is_returned_rather_than_dropped():
     """`division set` rejects it with exit 1 — at the END of the chore chain,
     after fixmdx and metadata have already run and been paid for."""
-    names, unknown = div.normalise("Electi, Divison A")   # sic
+    names, unknown = cfg.normalise("divisions", "Electi, Divison A")   # sic
     assert names == ["Electi"]
     assert unknown == ["Divison A"]
 
 
 def test_the_stored_form_is_canonical_and_in_modal_order():
-    names, _ = div.normalise("division a+, electi, tier 3")
-    assert div.render(names) == "Tier 3, Electi, Division A+"
+    names, _ = cfg.normalise("divisions", "division a+, electi, tier 3")
+    assert cfg.render("divisions", names) == "Tier 3, Electi, Division A+"
 
 
 def test_never_chosen_and_chosen_none_read_differently():
     """The whole point of the nullable column."""
-    assert "default" in div.describe(None)
-    assert "no division access" in div.describe("")
-    assert div.describe("Electi") == "Electi"
+    assert "default" in cfg.describe("divisions", None)
+    assert "no division access" in cfg.describe("divisions", "")
+    assert cfg.describe("divisions", "Electi") == "Electi"
+
+
+def test_the_vocabulary_has_no_second_implementation_behind_it():
+    """`divisions` is the vocabulary and nothing else.
+
+    A second copy of the canonicalisation is not a harmless duplicate here: the
+    round-trip test that pins Maestro's case-folding against the Scraper's can
+    only pin one of them, and for a while it pinned the copy nothing ran.
+    """
+    assert not [n for n in vars(div) if callable(getattr(div, n)) and not n.startswith("__")]
 
 
 # ------------------------------------------------------------ persistence
