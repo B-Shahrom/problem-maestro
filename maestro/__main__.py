@@ -579,6 +579,10 @@ def cmd_brief(args: argparse.Namespace) -> int:
         topic=args.topic or "",
         mix=mix,
         languages=tuple(x.strip() for x in args.languages.split(",") if x.strip()),
+        # Defaults to the install's own translation targets, so the brief and the
+        # chore that will actually run are the same fact rather than two.
+        translate_to=tuple(batch_cfg.split(args.translate_to if args.translate_to is not None
+                                           else cfg["targets"])),
         notes=args.notes or "",
     )
 
@@ -677,7 +681,12 @@ def main(argv: list[str] | None = None) -> int:
                          help="Problems per group: `easy=2,medium=2,hard=1` or `2:2:1`.")
     p_brief.add_argument("--prefix", help="Shared slug prefix, e.g. edu-arrays.")
     p_brief.add_argument("--topic", help="One line on what the set covers.")
-    p_brief.add_argument("--languages", default="EN", help="Statement languages, comma-separated.")
+    p_brief.add_argument("--languages", default="EN",
+                         help="What the author writes. EN alone unless you mean otherwise — "
+                              "the platform does the translating.")
+    p_brief.add_argument("--translate-to", dest="translate_to",
+                         help="What the platform will translate into afterwards. Defaults to "
+                              "the config's `targets`; '' to say this set is not translated.")
     p_brief.add_argument("--notes", help="Anything else the author needs for this set.")
     p_brief.add_argument("--with-contracts", action="store_true",
                          help="Inline the contract documents, for a session that lacks them.")

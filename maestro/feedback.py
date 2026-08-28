@@ -332,6 +332,13 @@ CLAUSES: dict[str, Clause] = {
         "CHARACTERISTICS_SPEC.md §2 File layout",
         "Name at least one language, and the same set for every problem in the set — "
         "the chore runner applies a single global `--targets` per run (C-6)."),
+    "B-5": Clause(
+        "A language is either authored or machine-translated into. Never both.",
+        "CHARACTERISTICS_SPEC.md §2 File layout, and the `translate` chore",
+        "Author one language — EN — and let the platform produce the rest. "
+        "`problem_editor translate` fills each target language field whether or "
+        "not something is already there, so an authored translation is "
+        "overwritten with a machine one and nothing anywhere reports the loss."),
 }
 
 _UNKNOWN = Clause(

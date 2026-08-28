@@ -105,6 +105,63 @@ against it, and the sandbox's imprecision stops mattering.
 
 ---
 
+## 2.2 Four transports, and the one question that ranks them
+
+The operator proposed a fifth option not in the table above: drive the **existing
+claude.ai Project** in a browser — new chat, paste the brief, collect the
+archives — the same Playwright technique the Platform Scraper uses on
+ElectiCode. It is worth setting beside the others rather than dismissed, because
+the thing it protects is real: that project carries instructions and accumulated
+memory that no fresh API call has.
+
+| | who authors | can compile & run code | transport | supported |
+|---|---|---|---|---|
+| **A. Today** | the Claude project | no | the operator pastes and drops | — |
+| **B. Browser automation** | the same project | no | Playwright on claude.ai | no — scripted access to the web UI is outside what the product supports, and it risks the account it runs as |
+| **C. API + extracted instructions** | a Messages API call carrying those instructions | no | HTTP | yes |
+| **D. Managed Agents** | an agent with a per-session sandbox | **yes** | HTTP | yes |
+
+B and C are the **same capability**. A Project chat has no compiler; neither does
+a Messages call. The difference between them is only how the request travels, and
+C's route is supported, faster, and not one DOM change away from breaking. What
+makes B look better is the instructions and the memory — and instructions are
+text. Extracting them into `docs/contracts/` is already question 1 of §5, it is
+needed under B, C and D alike, and doing it turns C into a strict improvement on
+B rather than a downgrade.
+
+### The measurement gap that B does not close
+
+A and B share a hole that is easy to miss because nothing reports it.
+`CHARACTERISTICS_SPEC.md` §5 requires the time limit to be justified from a
+*measured* run, and `PREFLIGHT.md` requires the reference solution to pass every
+test before delivery. Neither is possible in a chat window. So under A and B,
+`measured_worst_s` is either produced by the operator running the tests, or it is
+asserted.
+
+Maestro's M-16 checks that the measurement is *consistent* — measured worst case
+inside the limit, with margin. It cannot tell a measured number from an invented
+one, and no check downstream can either: a wrong limit passes import, build,
+verify, upload and audit, and surfaces weeks later as a TLE on a correct
+submission. Automating the transport does not touch this. It makes the same
+unverified number arrive faster.
+
+### The cheap fix that changes the ranking
+
+**Polygon already does this measurement, on the right hardware.**
+`buildPackage(verify=true)` runs the reference solution against every test at
+stage 4, on the judge's own machine — strictly better than any sandbox number,
+which is measured under unknown contention in a shared container.
+
+So the question in §2.1 is not a detail of option D; it is the thing that decides
+how much the transport matters. If the Middleman can surface per-test execution
+times, Maestro checks the authored TL against the machine that will enforce it,
+the author's own measurement drops from *source of truth* to *sanity check*, and
+"the authoring actor must be able to run code" stops being the constraint that
+ranks these four. That is one question to one dev, and it is worth asking before
+building any transport.
+
+---
+
 ## 3. What must not become a model
 
 The temptation with an Outcomes rubric is to let it grade the delivery. It must

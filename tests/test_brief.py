@@ -133,3 +133,48 @@ def test_a_missing_contract_is_announced_not_skipped(tmp_path):
 def test_render_is_stable():
     b = _b()
     assert B.render(b) == B.render(b)
+
+
+# ------------------------------------------------------------------ languages
+
+
+def test_the_author_writes_one_language_and_the_platform_does_the_rest():
+    """Not only a token saving. `problem_editor translate` runs after upload, so
+    an author writing ru/tg/uz is producing text the platform is about to
+    replace — and paying four times to produce the version that loses."""
+    b = B.Brief("edu-x", mix={"easy": 1}, translate_to=("ru", "tg", "uz"))
+    body = B.render(b)
+    assert "**EN only**" in body
+    assert "ru, tg, uz" in body
+    assert "after upload" in body
+
+
+def test_a_set_that_is_not_translated_says_so_rather_than_going_quiet():
+    """Silence here reads as "translation is someone's job and nobody said
+    whose", which is how an author ends up writing four statements anyway."""
+    body = B.render(B.Brief("edu-x", mix={"easy": 1}))
+    assert "not being translated" in body
+    assert "ru" not in body.split("## Deliverable")[0].replace("EN only", "")
+
+
+def test_the_brief_warns_that_the_english_is_machine_translation_input():
+    """It changes how the statement should be written, and no contract says it —
+    the contracts predate the translate chore existing."""
+    b = B.Brief("edu-x", mix={"easy": 1}, translate_to=("ru",))
+    assert "wordplay" in B.render(b)
+
+
+def test_authoring_a_language_the_platform_will_translate_into_is_refused():
+    """B-5. The translate step fills the target field whether or not something
+    is already there, so the authored text loses and nothing reports it."""
+    b = B.Brief("edu-x", mix={"easy": 1}, languages=("EN", "RU"),
+                    translate_to=("ru", "tg"))
+    codes = [f.check for f in B.check(b)]
+    assert "B-5" in codes
+    assert "overwrite" in next(f.message for f in B.check(b) if f.check == "B-5")
+
+
+def test_authoring_and_translating_disjoint_languages_is_fine():
+    b = B.Brief("edu-x", mix={"easy": 1}, languages=("EN",),
+                    translate_to=("ru", "tg", "uz"))
+    assert [f.check for f in B.check(b) if f.check == "B-5"] == []

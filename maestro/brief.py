@@ -56,6 +56,17 @@ class Brief:
     total to disagree with it."""
 
     languages: tuple[str, ...] = ("EN",)
+    """What the author *writes*. EN alone by default, and that is not only a
+    token saving — the platform does the translating, as a chore step after
+    upload. An author writing four languages is doing work that is about to be
+    redone by `problem_editor translate`, and paying four times to produce the
+    version that loses."""
+
+    translate_to: tuple[str, ...] = ()
+    """What the platform will translate *into*, later. Stated in the brief so the
+    author knows their EN text is the input to a machine translation and writes
+    accordingly — plain sentences, no idiom, no wordplay carrying the puzzle."""
+
     notes: str = ""
 
     @property
@@ -122,6 +133,16 @@ def check(brief: Brief, existing: set[str] | None = None) -> list[Finding]:
     # cannot be chored in one pass (C-6), so it is worth refusing here too.
     if not brief.languages:
         err("B-4", "no statement languages")
+
+    # B-5 — a language that is both authored and a translation target is authored
+    # work the platform is about to overwrite. Nothing downstream reports it: the
+    # translate step fills the target field whether or not something was there,
+    # and the audit compares the EN statement it was given.
+    if clash := sorted(set(l.lower() for l in brief.languages)
+                       & set(t.lower() for t in brief.translate_to)):
+        err("B-5", f"{', '.join(clash)} is both authored and a translation target — "
+                   f"the platform's translate step would overwrite the authored text. "
+                   f"Author one language and let the platform produce the rest")
     return out
 
 
@@ -163,11 +184,33 @@ def render(brief: Brief, *, contracts_dir: Path | str | None = None) -> str:
         "|---|---|",
         f"| `set.name` | `{brief.name}` |",
         f"| Slug prefix | {f'`{brief.prefix}-…`' if brief.prefix else '(none — pick per problem)'} |",
-        f"| Statement languages | {', '.join(brief.languages)} — the same set for **every** problem |",
+        f"| Statements you write | {', '.join(brief.languages)}, and only that — "
+        f"the same for **every** problem |",
         f"| `schema_version` | {', '.join(sorted(SUPPORTED_SCHEMA))} |",
         f"| Slug pattern | `{SLUG_RE.pattern}` |",
         "",
     ]
+    out += ["## Languages", ""]
+    if brief.translate_to:
+        out += [
+            f"Write the statement in **{', '.join(brief.languages)} only**. The platform "
+            f"translates it into {', '.join(brief.translate_to)} itself, after upload, as "
+            "one of the post-upload chores. Writing those versions yourself is work that "
+            "is about to be overwritten.",
+            "",
+            "Because your text is the input to that translation, write it to survive one: "
+            "plain sentences, no idiom, and never put the puzzle in wordplay — a problem "
+            "whose trick is an English pun becomes three broken problems.",
+            "",
+        ]
+    else:
+        out += [
+            f"Write the statement in **{', '.join(brief.languages)} only**, the same for "
+            "every problem in the set. No other language versions — this set is not being "
+            "translated.",
+            "",
+        ]
+
     if brief.notes:
         out += [brief.notes.strip(), ""]
 
