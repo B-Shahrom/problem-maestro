@@ -51,6 +51,16 @@ the piece that is correct under every architecture below.
 
 ## 2. Managed Agents vs. Claude API + our own sandbox
 
+> **Correction, 2026-08-28.** This section was written believing the existing
+> claude.ai project could not run code, and used that to rank the options. It
+> can — the project's own Playbook §8 makes cross-validation against a Python
+> oracle on every test *mandatory*, and its build environment is
+> `/home/claude/_helpers.py` doing compile, cross-validate, dedup, zip. The
+> verdict below is unchanged, but the reasoning is now better evidenced rather
+> than assumed: what a bare Messages API call lacks is precisely the sandbox the
+> project already has, which is what Managed Agents restores. See
+> `project-instructions-delta.md` §6.
+
 The decision hinges on one fact about the authoring work: **it cannot be done
 without executing code.**
 
@@ -121,29 +131,33 @@ memory that no fresh API call has.
 | **C. API + extracted instructions** | a Messages API call carrying those instructions | no | HTTP | yes |
 | **D. Managed Agents** | an agent with a per-session sandbox | **yes** | HTTP | yes |
 
-B and C are the **same capability**. A Project chat has no compiler; neither does
-a Messages call. The difference between them is only how the request travels, and
-C's route is supported, faster, and not one DOM change away from breaking. What
-makes B look better is the instructions and the memory — and instructions are
-text. Extracting them into `docs/contracts/` is already question 1 of §5, it is
-needed under B, C and D alike, and doing it turns C into a strict improvement on
-B rather than a downgrade.
+B and C are **not** the same capability, which is the correction above: the
+Project chat has a code-execution sandbox and a bare Messages call does not. What
+B has over C is therefore real — instructions, memory, *and* a compiler — and only
+the first two are text that can be moved. The third is what D restores.
+
+That leaves C as the weakest of the three rather than the drop-in replacement for
+B this section first claimed. It is still worth extracting the instructions,
+which is question 1 of §5 and is needed under B, C and D alike; it just does not
+by itself make C sufficient.
 
 ### The measurement gap that B does not close
 
-A and B share a hole that is easy to miss because nothing reports it.
-`CHARACTERISTICS_SPEC.md` §5 requires the time limit to be justified from a
-*measured* run, and `PREFLIGHT.md` requires the reference solution to pass every
-test before delivery. Neither is possible in a chat window. So under A and B,
-`measured_worst_s` is either produced by the operator running the tests, or it is
-asserted.
+The gap under A and B is narrower than it first looked, and it is a *recording*
+gap rather than a measuring one.
 
-Maestro's M-16 checks that the measurement is *consistent* — measured worst case
-inside the limit, with margin. It cannot tell a measured number from an invented
-one, and no check downstream can either: a wrong limit passes import, build,
-verify, upload and audit, and surfaces weeks later as a TLE on a correct
-submission. Automating the transport does not touch this. It makes the same
-unverified number arrive faster.
+The measurement happens. Playbook §6 requires profiling the worst case, §8
+requires cross-validation against an independent Python reference on every test
+with zero mismatches, and the container that does it is real. What does not
+happen is writing the number down: §10's Characteristic Table carries a
+"Suggested Time Limit" with no measurement behind it, and the project's
+instructions never mention `MANIFEST.json`, which is where `measured_worst_s`
+and `limits_rationale` live.
+
+So M-16 today checks that a *stated* limit is self-consistent. It cannot tell a
+measured number from an invented one — but the fix is not a different transport,
+it is one line in the project's instructions telling it to record what it already
+computed. Transport choice does not touch this in either direction.
 
 ### The cheap fix that changes the ranking
 
@@ -152,13 +166,12 @@ unverified number arrive faster.
 stage 4, on the judge's own machine — strictly better than any sandbox number,
 which is measured under unknown contention in a shared container.
 
-So the question in §2.1 is not a detail of option D; it is the thing that decides
-how much the transport matters. If the Middleman can surface per-test execution
-times, Maestro checks the authored TL against the machine that will enforce it,
-the author's own measurement drops from *source of truth* to *sanity check*, and
-"the authoring actor must be able to run code" stops being the constraint that
-ranks these four. That is one question to one dev, and it is worth asking before
-building any transport.
+The §2.1 question is still worth asking, and it has dropped a rank. A
+judge-hardware measurement beats a container one, so if the Middleman can surface
+per-test execution times, the author's own number becomes a sanity check against
+the machine that will actually enforce the limit. But it is no longer what stands
+in the way of anything: the author already measures, and getting it recorded is a
+documentation edit that costs nothing and works under every transport.
 
 ---
 

@@ -50,6 +50,10 @@ overwrites rather than appends. Those reorder Phase 2 toward correctness before 
 - **`docs/analysis/author-lane.md`** — the half of the pipeline before the watch directory:
   what "talking to the developer" decomposes into, why the authoring actor needs Managed
   Agents rather than the Claude API alone, and why the gate must stay deterministic under it
+- **`docs/analysis/project-instructions-delta.md`** — the author project's own Playbook and
+  Memory read against the gate: what an author following its instructions faithfully would
+  produce that Maestro rejects, and the one thing the gate wants that the project already
+  does and simply never writes down
 - **`docs/analysis/the-mind.md`** — where a model belongs *inside* the orchestrator, what
   it is allowed to do, and why "deal with problems on its own" turned out to be two
   different requests with very different answers
@@ -181,9 +185,9 @@ reported as killed rather than as a tool that failed.
 | `maestro/dashboard.py` | Stdlib HTTP over the event log, plus the only four mutations in the system: approve a run's writes, resume a stopped one, delete one, set its own divisions/targets/list |
 | `maestro/__main__.py` | `brief`, `check`, `inspect`, `run`, `status`, `init` — config is a JSON file, not flags |
 
-`python -m pytest` — 566 tests, no external services required.
+`python -m pytest` — 581 tests, no external services required.
 
-Five of the test modules check Maestro against something outside itself, and skip when it is
+Six of the test modules check Maestro against something outside itself, and skip when it is
 absent. They exist because most of Maestro's risk is not in its own logic but in its *model* of
 the systems around it, and a test that only checks Maestro against itself cannot see that model
 drifting — the dashboard's delete button once shipped inert with every server-side test green:
@@ -204,6 +208,11 @@ drifting — the dashboard's delete button once shipped inert with every server-
 - `test_characteristics_roundtrip.py` — the characteristics Maestro renders, parsed back by
   the real `batch.py`, down to the positional tag alignment and the flag that protects
   existing tags
+- `test_characteristics_template.py` — the same file read from the *other* end: the author
+  project's own `characteristics-template.md`, parsed by Maestro. Two incompatible specs for
+  this file have been live in that project at once, and the spec that resolved it in prose is
+  not something prose can enforce. Also pins that the template's 42 tags and the gate's are
+  one list — they are
 - `test_preflight_roundtrip.py` — the manifest cross-check against the real `zip_parser`,
   including that each field it reads means what it is assumed to mean
 
