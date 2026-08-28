@@ -12,6 +12,12 @@ and exposes one dashboard.
 | Polygon Middleman | Everything on Polygon — import, build, verify, package | HTTP (`:8000`) |
 | Platform Scraper | Everything on ElectiCode — upload + post-upload processing | subprocess (Playwright CLIs) |
 
+Throughout this repo and its docs, **"the author" means the Problem-developer actor** — today
+a Claude project that writes the problems — and never the operator. The operator is *you*: you
+write the brief, approve the writes, and today act as the courier between the two, downloading
+the author's archives into the watch directory and pasting rejections back. Automating that
+lane replaces the courier, not the operator.
+
 ## Status
 
 Build phase. Both integration lanes are written and tested; the cross-actor analysis that

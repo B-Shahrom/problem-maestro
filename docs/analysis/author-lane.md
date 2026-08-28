@@ -17,6 +17,15 @@ a model, so the model is replacing a working loop rather than defining one.
 
 ---
 
+## 0. Who "the author" is
+
+The **Problem-developer** actor — today a Claude project, reached through a chat window. Not
+the operator. The operator briefs it, carries its output into the watch directory, carries
+rejections back, and approves what Maestro does with the result; every exchange below is
+Maestro ↔ *author*, with the operator currently standing in the middle of each one as a
+courier. What §3 automates is that courier role. The operator keeps the brief and keeps the
+approval gates under every option here.
+
 ## 1. What "talking to the developer" actually decomposes into
 
 Three exchanges, not one. They have different shapes and very different risk.
